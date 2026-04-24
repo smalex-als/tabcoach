@@ -779,16 +779,19 @@ async function showTabSwitcherModal() {
             type: toggleBookmarkMessage,
             tabId,
             title: tab.displayTitle || tab.title || tab.url || "Untitled tab",
-            url: tab.url
+            url: tab.url,
+            groupTitle: tab.group?.title || "Ungrouped"
           })
           .then((response) => {
             if (!response?.ok) {
               return;
             }
 
+            const previousScrollTop = list.scrollTop;
             tabs = tabs.map((item) => (item.id === tabId ? { ...item, bookmarked: response.bookmarked } : item));
             sortTabs();
             renderTabs();
+            list.scrollTop = previousScrollTop;
           });
       };
 
@@ -961,6 +964,7 @@ async function showTabSwitcherModal() {
         });
         button.addEventListener("click", () => {
           const selectedTabId = Number(rows[selectedIndex]?.dataset.tabcoachTabId);
+          const previousScrollTop = list.scrollTop;
           sortMode = mode;
           sortTabs();
           selectedIndex = Math.max(
@@ -968,6 +972,7 @@ async function showTabSwitcherModal() {
             visibleTabs.findIndex((tab) => tab.id === selectedTabId)
           );
           renderTabs();
+          list.scrollTop = previousScrollTop;
         });
         return button;
       };
@@ -1076,6 +1081,11 @@ async function showTabSwitcherModal() {
               return;
             }
 
+            if (event.target instanceof HTMLElement && event.target.closest("button")) {
+              event.preventDefault();
+              return;
+            }
+
             draggedTabId = tab.id;
             event.dataTransfer.effectAllowed = "move";
             event.dataTransfer.setData("text/plain", String(tab.id));
@@ -1107,6 +1117,7 @@ async function showTabSwitcherModal() {
           });
 
           const icon = document.createElement("div");
+          icon.draggable = false;
           Object.assign(icon.style, {
             width: "32px",
             height: "32px",
@@ -1119,6 +1130,7 @@ async function showTabSwitcherModal() {
             const image = document.createElement("img");
             image.src = tab.favIconUrl;
             image.alt = "";
+            image.draggable = false;
             Object.assign(image.style, {
               width: "32px",
               height: "32px",
@@ -1164,6 +1176,7 @@ async function showTabSwitcherModal() {
 
           const closeTabButton = document.createElement("button");
           closeTabButton.type = "button";
+          closeTabButton.draggable = false;
           closeTabButton.textContent = "×";
           closeTabButton.setAttribute("aria-label", `Close ${tab.displayTitle || tab.title || tab.url || "tab"}`);
           Object.assign(closeTabButton.style, {
@@ -1185,6 +1198,10 @@ async function showTabSwitcherModal() {
           closeTabButton.addEventListener("pointerdown", (event) => {
             event.stopPropagation();
           });
+          closeTabButton.addEventListener("dragstart", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          });
           closeTabButton.addEventListener("mouseenter", () => {
             closeTabButton.style.background = "rgba(248, 113, 113, 0.16)";
             closeTabButton.style.color = "#fecaca";
@@ -1198,6 +1215,7 @@ async function showTabSwitcherModal() {
 
           const bookmarkButton = document.createElement("button");
           bookmarkButton.type = "button";
+          bookmarkButton.draggable = false;
           bookmarkButton.textContent = tab.bookmarked ? "★" : "☆";
           bookmarkButton.setAttribute(
             "aria-label",
@@ -1220,6 +1238,10 @@ async function showTabSwitcherModal() {
             toggleBookmark(tab.id);
           });
           bookmarkButton.addEventListener("pointerdown", (event) => {
+            event.stopPropagation();
+          });
+          bookmarkButton.addEventListener("dragstart", (event) => {
+            event.preventDefault();
             event.stopPropagation();
           });
           bookmarkButton.addEventListener("mouseenter", () => {
@@ -1353,7 +1375,24 @@ async function getOrCreateBookmarkFolder() {
   return folder.id;
 }
 
-async function toggleBookmarkFromSwitcher(tabId, title, url, senderTab) {
+async function getOrCreateBookmarkSubfolder(parentId, title) {
+  const children = await chrome.bookmarks.getChildren(parentId);
+  const existingFolder = children.find((bookmark) => bookmark.title === title && !bookmark.url);
+
+  if (existingFolder?.id) {
+    return existingFolder.id;
+  }
+
+  const folder = await chrome.bookmarks.create({ parentId, title });
+  return folder.id;
+}
+
+function normalizeBookmarkFolderTitle(title) {
+  const normalized = typeof title === "string" ? title.trim().replace(/\s+/g, " ") : "";
+  return normalized || "Ungrouped";
+}
+
+async function toggleBookmarkFromSwitcher(tabId, title, url, groupTitle, senderTab) {
   if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
     throw new Error("Invalid tab id");
   }
@@ -1375,7 +1414,8 @@ async function toggleBookmarkFromSwitcher(tabId, title, url, senderTab) {
     return false;
   }
 
-  const parentId = await getOrCreateBookmarkFolder();
+  const rootFolderId = await getOrCreateBookmarkFolder();
+  const parentId = await getOrCreateBookmarkSubfolder(rootFolderId, normalizeBookmarkFolderTitle(groupTitle));
   await chrome.bookmarks.create({
     parentId,
     title: typeof title === "string" && title.trim() ? title.trim() : targetTab.title ?? url,
@@ -1436,7 +1476,7 @@ chrome.tabs.onActivated.addListener(() => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === TOGGLE_BOOKMARK_MESSAGE) {
-    void toggleBookmarkFromSwitcher(message.tabId, message.title, message.url, sender.tab)
+    void toggleBookmarkFromSwitcher(message.tabId, message.title, message.url, message.groupTitle, sender.tab)
       .then((bookmarked) => {
         sendResponse({ ok: true, bookmarked });
       })
