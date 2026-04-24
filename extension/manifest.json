@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Tabcoach",
+  "version": "0.1.0",
+  "description": "Sync open Chrome tabs to a local Tabcoach server.",
+  "permissions": ["tabs", "tabGroups", "alarms", "scripting", "activeTab", "notifications"],
+  "host_permissions": ["http://127.0.0.1:3847/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "show-tab-switcher": {
+      "suggested_key": {
+        "default": "Ctrl+E",
+        "mac": "Command+E"
+      },
+      "description": "Show tabs in the current window"
+    },
+    "speak-selection": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "Send selected text to Tabcoach TTS"
+    }
+  },
+  "action": {
+    "default_title": "Tabcoach"
+  }
+}
