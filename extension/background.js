@@ -205,7 +205,7 @@ function compareTabsForKeep(left, right) {
   return (left.id ?? Number.MAX_SAFE_INTEGER) - (right.id ?? Number.MAX_SAFE_INTEGER);
 }
 
-async function closeDuplicateTabs(tabs, protectedWindowId = null) {
+async function closeDuplicateTabs(tabs) {
   if (!AUTO_CLOSE_DUPLICATES) {
     return;
   }
@@ -213,10 +213,6 @@ async function closeDuplicateTabs(tabs, protectedWindowId = null) {
   const duplicateGroups = findDuplicateGroups(tabs);
 
   for (const group of duplicateGroups) {
-    if (protectedWindowId !== null && group.tabs.some((tab) => tab.windowId === protectedWindowId)) {
-      continue;
-    }
-
     const sortedTabs = [...group.tabs].sort(compareTabsForKeep);
     const tabsToClose = sortedTabs
       .slice(1)
@@ -289,7 +285,7 @@ async function pushSnapshot(reason) {
   try {
     const protectedWindowId = await getFocusedWindowId();
     const tabs = await collectTabs();
-    await closeDuplicateTabs(tabs, protectedWindowId);
+    await closeDuplicateTabs(tabs);
     await ensureDocsGroup(protectedWindowId);
     const refreshedTabs = await collectTabs();
     const response = await fetch(SERVER_URL, {
@@ -491,6 +487,100 @@ async function sendSelectionToTts() {
   await showTtsSuccessFeedback(selectedText);
 }
 
+function getTabTitleKey(title) {
+  return title.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function isWeakTabTitle(title) {
+  const normalized = getTabTitleKey(title);
+  return normalized === "" || normalized === "new tab" || normalized === "untitled" || normalized === "about:blank" || normalized === "loading...";
+}
+
+function getReadablePathSegment(pathname) {
+  const segments = pathname
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .filter((segment) => !["edit", "view", "pull", "issues", "browse", "d"].includes(segment.toLowerCase()));
+
+  const segment = segments.at(-1);
+  if (!segment) {
+    return "";
+  }
+
+  try {
+    return decodeURIComponent(segment).replace(/[-_]+/g, " ").trim();
+  } catch {
+    return segment.replace(/[-_]+/g, " ").trim();
+  }
+}
+
+function inferTabTitleHint(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = parsed.hostname.replace(/^www\./, "");
+    const jiraTicket = parsed.pathname.match(/\/browse\/([A-Z][A-Z0-9]+-\d+)/);
+    if (jiraTicket) {
+      return jiraTicket[1];
+    }
+
+    const pullRequest = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    if (pullRequest) {
+      return `${pullRequest[1]}/${pullRequest[2]} PR #${pullRequest[3]}`;
+    }
+
+    const issue = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
+    if (issue) {
+      return `${issue[1]}/${issue[2]} issue #${issue[3]}`;
+    }
+
+    const searchQuery = parsed.searchParams.get("q") ?? parsed.searchParams.get("query") ?? parsed.searchParams.get("search");
+    if (searchQuery) {
+      return `${hostname} search: ${searchQuery}`;
+    }
+
+    const pathSegment = getReadablePathSegment(parsed.pathname);
+    return pathSegment || hostname;
+  } catch {
+    return rawUrl.trim();
+  }
+}
+
+function addTabDisplayTitles(items) {
+  const titleCounts = new Map();
+
+  for (const item of items) {
+    const key = getTabTitleKey(item.title);
+    titleCounts.set(key, (titleCounts.get(key) ?? 0) + 1);
+  }
+
+  return items.map((item) => {
+    const title = item.title.trim();
+    const titleKey = getTabTitleKey(title);
+    const hint = inferTabTitleHint(item.url);
+    const shouldImproveTitle = isWeakTabTitle(title) || titleCounts.get(titleKey) > 1;
+
+    if (!shouldImproveTitle || !hint) {
+      return {
+        ...item,
+        displayTitle: title || hint || item.url || "Untitled tab"
+      };
+    }
+
+    if (!title || isWeakTabTitle(title)) {
+      return {
+        ...item,
+        displayTitle: hint
+      };
+    }
+
+    return {
+      ...item,
+      displayTitle: title.toLowerCase().includes(hint.toLowerCase()) ? title : `${title} - ${hint}`
+    };
+  });
+}
+
 function toTabSwitcherItem(tab, group = null) {
   return {
     id: tab.id,
@@ -516,10 +606,12 @@ async function collectTabSwitcherItems(windowId) {
   const tabGroups = await chrome.tabGroups.query({ windowId });
   const tabGroupsById = new Map(tabGroups.map((group) => [group.id, group]));
 
-  return currentWindowTabs.map((tab) => {
+  const items = currentWindowTabs.map((tab) => {
     const group = typeof tab.groupId === "number" && tab.groupId >= 0 ? tabGroupsById.get(tab.groupId) : null;
     return toTabSwitcherItem(tab, group);
   });
+
+  return addTabDisplayTitles(items);
 }
 
 async function showTabSwitcherModal() {
@@ -908,7 +1000,7 @@ async function showTabSwitcherModal() {
           row.title = sortMode === "window" ? "Drag to reorder tabs" : "";
           Object.assign(row.style, {
             display: "grid",
-            gridTemplateColumns: "32px minmax(0, 1fr) auto 34px",
+            gridTemplateColumns: "40px minmax(0, 1fr) auto 34px",
             alignItems: "center",
             gap: "12px",
             padding: "11px 12px",
@@ -963,9 +1055,9 @@ async function showTabSwitcherModal() {
 
           const icon = document.createElement("div");
           Object.assign(icon.style, {
-            width: "24px",
-            height: "24px",
-            borderRadius: "4px",
+            width: "32px",
+            height: "32px",
+            borderRadius: "6px",
             overflow: "hidden",
             background: "#4b5563"
           });
@@ -975,8 +1067,8 @@ async function showTabSwitcherModal() {
             image.src = tab.favIconUrl;
             image.alt = "";
             Object.assign(image.style, {
-              width: "24px",
-              height: "24px",
+              width: "32px",
+              height: "32px",
               display: "block"
             });
             icon.appendChild(image);
@@ -988,7 +1080,7 @@ async function showTabSwitcherModal() {
           });
 
           const tabTitle = document.createElement("div");
-          tabTitle.textContent = tab.title || tab.url || "Untitled tab";
+          tabTitle.textContent = tab.displayTitle || tab.title || tab.url || "Untitled tab";
           Object.assign(tabTitle.style, {
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -1020,7 +1112,7 @@ async function showTabSwitcherModal() {
           const closeTabButton = document.createElement("button");
           closeTabButton.type = "button";
           closeTabButton.textContent = "×";
-          closeTabButton.setAttribute("aria-label", `Close ${tab.title || tab.url || "tab"}`);
+          closeTabButton.setAttribute("aria-label", `Close ${tab.displayTitle || tab.title || tab.url || "tab"}`);
           Object.assign(closeTabButton.style, {
             width: "28px",
             height: "28px",
@@ -1036,6 +1128,9 @@ async function showTabSwitcherModal() {
             event.preventDefault();
             event.stopPropagation();
             closeTab(tab.id);
+          });
+          closeTabButton.addEventListener("pointerdown", (event) => {
+            event.stopPropagation();
           });
           closeTabButton.addEventListener("mouseenter", () => {
             closeTabButton.style.background = "rgba(248, 113, 113, 0.16)";

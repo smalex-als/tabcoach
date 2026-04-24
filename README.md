@@ -89,14 +89,10 @@ Auto-close rules:
 - prefer the active tab
 - then prefer pinned tabs
 - only close duplicates that are neither active nor pinned
-- never auto-close any duplicate group that includes a tab in the currently focused window
 - give newly created tabs a 3 minute grace period before duplicate auto-close applies
 
-Focused window protection:
+Focused window Docs grouping protection:
 
-- the currently focused normal window is treated as hands-off
-- duplicate cleanup does nothing to tabs in that window
-- if a duplicate group spans the focused window and another window, the whole group is left alone
 - Google Docs tabs in the focused window are not regrouped into the `Docs` tab group until you leave that window
 
 ## Output File
