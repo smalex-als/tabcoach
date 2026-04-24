@@ -13,6 +13,8 @@ const TAB_SWITCHER_MODAL_ID = "__tabcoach_tab_switcher_modal";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
+const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
+const BOOKMARK_FOLDER_TITLE = "Tabcoach";
 
 const TRACKING_PARAMS = new Set([
   "fbclid",
@@ -601,14 +603,41 @@ function toTabSwitcherItem(tab, group = null) {
   };
 }
 
+async function collectBookmarkedUrls(tabs) {
+  const bookmarkedUrls = new Set();
+
+  await Promise.all(
+    tabs.map(async (tab) => {
+      if (!tab.url) {
+        return;
+      }
+
+      try {
+        const bookmarks = await chrome.bookmarks.search({ url: tab.url });
+        if (bookmarks.some((bookmark) => bookmark.url === tab.url)) {
+          bookmarkedUrls.add(tab.url);
+        }
+      } catch (error) {
+        console.warn("Tabcoach bookmark lookup failed", tab.url, error);
+      }
+    })
+  );
+
+  return bookmarkedUrls;
+}
+
 async function collectTabSwitcherItems(windowId) {
   const currentWindowTabs = await chrome.tabs.query({ windowId });
   const tabGroups = await chrome.tabGroups.query({ windowId });
   const tabGroupsById = new Map(tabGroups.map((group) => [group.id, group]));
+  const bookmarkedUrls = await collectBookmarkedUrls(currentWindowTabs);
 
   const items = currentWindowTabs.map((tab) => {
     const group = typeof tab.groupId === "number" && tab.groupId >= 0 ? tabGroupsById.get(tab.groupId) : null;
-    return toTabSwitcherItem(tab, group);
+    return {
+      ...toTabSwitcherItem(tab, group),
+      bookmarked: Boolean(tab.url && bookmarkedUrls.has(tab.url))
+    };
   });
 
   return addTabDisplayTitles(items);
@@ -625,7 +654,7 @@ async function showTabSwitcherModal() {
 
   await chrome.scripting.executeScript({
     target: { tabId: activeTab.id },
-    func: (tabs, modalId, switchTabMessage, closeTabMessage, moveTabMessage) => {
+    func: (tabs, modalId, switchTabMessage, closeTabMessage, moveTabMessage, toggleBookmarkMessage) => {
       const existingModal = document.getElementById(modalId);
       if (existingModal) {
         existingModal.remove();
@@ -736,6 +765,30 @@ async function showTabSwitcherModal() {
             );
             renderTabs();
             title.textContent = `Tabs in this window (${visibleTabs.length})`;
+          });
+      };
+
+      const toggleBookmark = (tabId) => {
+        const tab = tabs.find((item) => item.id === tabId);
+        if (!tab) {
+          return;
+        }
+
+        void chrome.runtime
+          .sendMessage({
+            type: toggleBookmarkMessage,
+            tabId,
+            title: tab.displayTitle || tab.title || tab.url || "Untitled tab",
+            url: tab.url
+          })
+          .then((response) => {
+            if (!response?.ok) {
+              return;
+            }
+
+            tabs = tabs.map((item) => (item.id === tabId ? { ...item, bookmarked: response.bookmarked } : item));
+            sortTabs();
+            renderTabs();
           });
       };
 
@@ -1000,7 +1053,7 @@ async function showTabSwitcherModal() {
           row.title = sortMode === "window" ? "Drag to reorder tabs" : "";
           Object.assign(row.style, {
             display: "grid",
-            gridTemplateColumns: "40px minmax(0, 1fr) auto 34px",
+            gridTemplateColumns: "40px minmax(0, 1fr) auto 34px 34px",
             alignItems: "center",
             gap: "12px",
             padding: "11px 12px",
@@ -1143,8 +1196,43 @@ async function showTabSwitcherModal() {
             closeTabButton.style.border = "1px solid transparent";
           });
 
+          const bookmarkButton = document.createElement("button");
+          bookmarkButton.type = "button";
+          bookmarkButton.textContent = tab.bookmarked ? "★" : "☆";
+          bookmarkButton.setAttribute(
+            "aria-label",
+            `${tab.bookmarked ? "Remove bookmark for" : "Bookmark"} ${tab.displayTitle || tab.title || tab.url || "tab"}`
+          );
+          Object.assign(bookmarkButton.style, {
+            width: "28px",
+            height: "28px",
+            border: "1px solid transparent",
+            borderRadius: "6px",
+            background: "transparent",
+            color: tab.bookmarked ? "#facc15" : "#d1d5db",
+            font: "22px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            cursor: "pointer",
+            padding: "0"
+          });
+          bookmarkButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleBookmark(tab.id);
+          });
+          bookmarkButton.addEventListener("pointerdown", (event) => {
+            event.stopPropagation();
+          });
+          bookmarkButton.addEventListener("mouseenter", () => {
+            bookmarkButton.style.background = "rgba(250, 204, 21, 0.14)";
+            bookmarkButton.style.border = "1px solid rgba(250, 204, 21, 0.38)";
+          });
+          bookmarkButton.addEventListener("mouseleave", () => {
+            bookmarkButton.style.background = "transparent";
+            bookmarkButton.style.border = "1px solid transparent";
+          });
+
           text.append(tabTitle, tabUrl);
-          row.append(icon, text, status, closeTabButton);
+          row.append(icon, text, status, bookmarkButton, closeTabButton);
           rows.push(row);
           list.appendChild(row);
         });
@@ -1186,7 +1274,7 @@ async function showTabSwitcherModal() {
       renderTabs();
       panel.focus();
     },
-    args: [tabItems, TAB_SWITCHER_MODAL_ID, SWITCH_TAB_MESSAGE, CLOSE_TAB_MESSAGE, MOVE_TAB_MESSAGE]
+    args: [tabItems, TAB_SWITCHER_MODAL_ID, SWITCH_TAB_MESSAGE, CLOSE_TAB_MESSAGE, MOVE_TAB_MESSAGE, TOGGLE_BOOKMARK_MESSAGE]
   });
 }
 
@@ -1253,6 +1341,49 @@ async function moveTabFromSwitcher(tabId, index, groupId, senderTab) {
   return collectTabSwitcherItems(targetTab.windowId);
 }
 
+async function getOrCreateBookmarkFolder() {
+  const matches = await chrome.bookmarks.search({ title: BOOKMARK_FOLDER_TITLE });
+  const existingFolder = matches.find((bookmark) => bookmark.title === BOOKMARK_FOLDER_TITLE && !bookmark.url);
+
+  if (existingFolder?.id) {
+    return existingFolder.id;
+  }
+
+  const folder = await chrome.bookmarks.create({ title: BOOKMARK_FOLDER_TITLE });
+  return folder.id;
+}
+
+async function toggleBookmarkFromSwitcher(tabId, title, url, senderTab) {
+  if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
+    throw new Error("Invalid tab id");
+  }
+
+  if (typeof url !== "string" || url.length === 0) {
+    throw new Error("Invalid bookmark URL");
+  }
+
+  const targetTab = await chrome.tabs.get(tabId);
+  if (typeof senderTab?.windowId === "number" && targetTab.windowId !== senderTab.windowId) {
+    throw new Error("Cannot bookmark a tab outside the current window");
+  }
+
+  const existingBookmarks = await chrome.bookmarks.search({ url });
+  const existingBookmark = existingBookmarks.find((bookmark) => bookmark.url === url);
+
+  if (existingBookmark?.id) {
+    await chrome.bookmarks.remove(existingBookmark.id);
+    return false;
+  }
+
+  const parentId = await getOrCreateBookmarkFolder();
+  await chrome.bookmarks.create({
+    parentId,
+    title: typeof title === "string" && title.trim() ? title.trim() : targetTab.title ?? url,
+    url
+  });
+  return true;
+}
+
 function scheduleSync(reason) {
   if (pendingSyncTimer !== null) {
     clearTimeout(pendingSyncTimer);
@@ -1304,6 +1435,19 @@ chrome.tabs.onActivated.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === TOGGLE_BOOKMARK_MESSAGE) {
+    void toggleBookmarkFromSwitcher(message.tabId, message.title, message.url, sender.tab)
+      .then((bookmarked) => {
+        sendResponse({ ok: true, bookmarked });
+      })
+      .catch((error) => {
+        console.error("Tabcoach bookmark toggle failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
   if (message?.type === MOVE_TAB_MESSAGE) {
     void moveTabFromSwitcher(message.tabId, message.index, message.groupId, sender.tab)
       .then((tabs) => {

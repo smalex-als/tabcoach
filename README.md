@@ -79,7 +79,7 @@ The extension will:
 - auto-close duplicate tabs conservatively
 - group Google Docs, Sheets, and Slides tabs into a blue `Docs` tab group
 - show the duplicate-group count as the extension badge text
-- show, drag-reorder, close, and switch between tabs in the current window with `Command+E` on macOS, including tab group labels and recently visited sorting
+- show, drag-reorder, bookmark, close, and switch between tabs in the current window with `Command+E` on macOS, including tab group labels and recently visited sorting
 - send selected page text to the local TTS flow with `Command+Shift+S` on macOS
 - show a badge and notification when TTS is started successfully
 
