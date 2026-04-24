@@ -9,14 +9,14 @@ Tabcoach is a two-part setup:
 
 - Reads all open Chrome tabs from the extension
 - Detects duplicate tabs by normalized URL
-- Extracts unique `https://code.corp.indeed.com/<group>/<repo>/` links
-- Extracts unique Jira ticket links like `https://indeed.atlassian.net/browse/NEXSCI-464`
+- Extracts unique repository links
+- Extracts unique Jira ticket links
 - Extracts Google Docs, Sheets, and Slides document links
 - Stores repos, Jira tickets, and documents in the same cumulative Markdown file
 - Saves `Last Opened` as `YYYY-MM-DD`
 - Keeps document names in the registry after tabs are closed, instead of degrading them back to plain URLs
 - Sorts records by most recently opened first
-- Formats links as Markdown links like `[talent-scout-dradis-integration](https://code.corp.indeed.com/one-host/talent-scout-dradis-integration/)`
+- Formats links as Markdown links
 
 ## Project Layout
 
@@ -54,7 +54,7 @@ Server defaults:
 
 - `HOST`: `127.0.0.1`
 - `PORT`: `3847`
-- `REPO_LIST_OUTPUT_PATH`: `/Users/smalex/Documents/home/indeed-repos.md`
+- `REPO_LIST_OUTPUT_PATH`: `code-repos.md`
 - `TAB_SWITCH_LOG_PATH`: `tab-switch-log.jsonl`
 - `TAB_EVENT_LOG_PATH`: `tabcoach-events.jsonl`
 - `TTS_CLIPBOARD_APP_PATH`: `/Users/smalex/bin/tts-clipboard`
@@ -102,7 +102,7 @@ Focused window Docs grouping protection:
 
 The repo registry is written to:
 
-[indeed-repos.md](/Users/smalex/Documents/home/indeed-repos.md)
+[code-repos.md](/Users/smalex/jsprojects/tabcoach/code-repos.md)
 
 Format:
 
@@ -111,13 +111,13 @@ Format:
 
 | Last Opened | Repository | Title |
 | --- | --- | --- |
-| 2026-03-11 | [talent-scout-dradis-integration](https://code.corp.indeed.com/one-host/talent-scout-dradis-integration/) | Talent Scout Dradis Integration |
+| 2026-03-11 | [example-service](https://git.example.com/platform/example-service/) | Example Service |
 
 ## Jira Tickets
 
 | Last Opened | Ticket |
 | --- | --- |
-| 2026-03-11 | [[NEXSCI-464] CSP Prompt: Seamless Merge of Employer Activity Signals into Scoring - Jira Software](https://indeed.atlassian.net/browse/NEXSCI-464) |
+| 2026-03-11 | [[APP-123] Example ticket - Jira Software](https://jira.example.com/browse/APP-123) |
 
 ## Documents
 

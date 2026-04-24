@@ -106,7 +106,7 @@ function loadConfig(): Config {
   return {
     host: process.env.HOST ?? "127.0.0.1",
     port: readNumber("PORT", 3847),
-    repoListOutputPath: process.env.REPO_LIST_OUTPUT_PATH ?? "/Users/smalex/Documents/home/indeed-repos.md",
+    repoListOutputPath: process.env.REPO_LIST_OUTPUT_PATH ?? "code-repos.md",
     tabSwitchLogPath: process.env.TAB_SWITCH_LOG_PATH ?? "tab-switch-log.jsonl",
     tabEventLogPath: process.env.TAB_EVENT_LOG_PATH ?? "tabcoach-events.jsonl",
     ttsClipboardAppPath: process.env.TTS_CLIPBOARD_APP_PATH ?? "/Users/smalex/bin/tts-clipboard",

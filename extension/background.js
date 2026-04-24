@@ -17,6 +17,7 @@ const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
+const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
 
 const TRACKING_PARAMS = new Set([
@@ -657,7 +658,7 @@ async function showTabSwitcherModal() {
 
   await chrome.scripting.executeScript({
     target: { tabId: activeTab.id },
-    func: (tabs, modalId, switchTabMessage, closeTabMessage, moveTabMessage, toggleBookmarkMessage, copyTabUrlMessage) => {
+    func: (tabs, modalId, switchTabMessage, closeTabMessage, moveTabMessage, toggleBookmarkMessage, copyTabUrlMessage, logTabEventMessage) => {
       const existingModal = document.getElementById(modalId);
       if (existingModal) {
         existingModal.remove();
@@ -815,18 +816,13 @@ async function showTabSwitcherModal() {
       };
 
       const logCopyTabUrl = (tab, copied) => {
-        void fetch(TAB_EVENT_LOG_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            eventType: "copy-tab-url",
-            occurredAt: new Date().toISOString(),
-            source: "chrome-extension:tab-switcher",
-            ok: copied,
-            tab
-          })
+        void chrome.runtime.sendMessage({
+          type: logTabEventMessage,
+          eventType: "copy-tab-url",
+          occurredAt: new Date().toISOString(),
+          source: "chrome-extension:tab-switcher",
+          ok: copied,
+          tab
         }).catch((error) => {
           console.warn("Tabcoach tab event log failed", error);
         });
@@ -1378,7 +1374,16 @@ async function showTabSwitcherModal() {
       renderTabs();
       panel.focus();
     },
-    args: [tabItems, TAB_SWITCHER_MODAL_ID, SWITCH_TAB_MESSAGE, CLOSE_TAB_MESSAGE, MOVE_TAB_MESSAGE, TOGGLE_BOOKMARK_MESSAGE, COPY_TAB_URL_MESSAGE]
+    args: [
+      tabItems,
+      TAB_SWITCHER_MODAL_ID,
+      SWITCH_TAB_MESSAGE,
+      CLOSE_TAB_MESSAGE,
+      MOVE_TAB_MESSAGE,
+      TOGGLE_BOOKMARK_MESSAGE,
+      COPY_TAB_URL_MESSAGE,
+      LOG_TAB_EVENT_MESSAGE
+    ]
   });
 }
 
@@ -1538,6 +1543,26 @@ async function copyTabUrlFromSwitcher(tabId, url, senderTab) {
   await navigator.clipboard.writeText(url);
 }
 
+async function logTabEventFromSwitcher(payload) {
+  const response = await fetch(TAB_EVENT_LOG_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      eventType: payload?.eventType,
+      occurredAt: payload?.occurredAt,
+      source: payload?.source,
+      ok: payload?.ok,
+      tab: payload?.tab
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Tab event server returned ${response.status}`);
+  }
+}
+
 function scheduleSync(reason) {
   if (pendingSyncTimer !== null) {
     clearTimeout(pendingSyncTimer);
@@ -1589,6 +1614,19 @@ chrome.tabs.onActivated.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === LOG_TAB_EVENT_MESSAGE) {
+    void logTabEventFromSwitcher(message)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error) => {
+        console.error("Tabcoach tab event log failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
   if (message?.type === COPY_TAB_URL_MESSAGE) {
     void copyTabUrlFromSwitcher(message.tabId, message.url, sender.tab)
       .then(() => {
