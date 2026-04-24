@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 type BrowserTab = {
@@ -33,6 +33,8 @@ type Config = {
   host: string;
   port: number;
   repoListOutputPath: string;
+  tabSwitchLogPath: string;
+  tabEventLogPath: string;
   ttsClipboardAppPath: string;
   openAiApiKey?: string;
   openAiTranslationModel: string;
@@ -52,6 +54,21 @@ type TtsSelectionPayload = {
   pageTitle?: string;
   pageUrl?: string;
   source?: string;
+};
+
+type TabSwitchPayload = {
+  switchedAt?: string;
+  source?: string;
+  from?: BrowserTab | null;
+  to?: BrowserTab | null;
+};
+
+type TabEventPayload = {
+  eventType?: string;
+  occurredAt?: string;
+  source?: string;
+  ok?: boolean;
+  tab?: BrowserTab | null;
 };
 
 const DEFAULT_TRACKING_PARAMS = new Set([
@@ -90,6 +107,8 @@ function loadConfig(): Config {
     host: process.env.HOST ?? "127.0.0.1",
     port: readNumber("PORT", 3847),
     repoListOutputPath: process.env.REPO_LIST_OUTPUT_PATH ?? "/Users/smalex/Documents/home/indeed-repos.md",
+    tabSwitchLogPath: process.env.TAB_SWITCH_LOG_PATH ?? "tab-switch-log.jsonl",
+    tabEventLogPath: process.env.TAB_EVENT_LOG_PATH ?? "tabcoach-events.jsonl",
     ttsClipboardAppPath: process.env.TTS_CLIPBOARD_APP_PATH ?? "/Users/smalex/bin/tts-clipboard",
     openAiApiKey: process.env.OPENAI_API_KEY,
     openAiTranslationModel: process.env.OPENAI_TRANSLATION_MODEL ?? "gpt-4.1-mini",
@@ -702,6 +721,54 @@ async function handleTtsSelection(request: IncomingMessage, response: ServerResp
   });
 }
 
+async function handleTabSwitch(request: IncomingMessage, response: ServerResponse, config: Config): Promise<void> {
+  const body = await readJsonBody(request);
+  const payload = body as TabSwitchPayload;
+  const switchedAt = typeof payload.switchedAt === "string" ? payload.switchedAt : new Date().toISOString();
+  const record = {
+    switchedAt,
+    source: payload.source ?? "unknown",
+    from: payload.from && isBrowserTab(payload.from) ? payload.from : null,
+    to: payload.to && isBrowserTab(payload.to) ? payload.to : null
+  };
+
+  await mkdir(dirname(config.tabSwitchLogPath), { recursive: true });
+  await appendFile(config.tabSwitchLogPath, `${JSON.stringify(record)}\n`, "utf8");
+
+  console.log(
+    `[${new Date().toISOString()}] tab switch from ${record.from?.title ?? "(unknown)"} to ${record.to?.title ?? "(unknown)"}`
+  );
+
+  sendJson(response, 200, {
+    ok: true,
+    logged: true
+  });
+}
+
+async function handleTabEvent(request: IncomingMessage, response: ServerResponse, config: Config): Promise<void> {
+  const body = await readJsonBody(request);
+  const payload = body as TabEventPayload;
+  const record = {
+    occurredAt: typeof payload.occurredAt === "string" ? payload.occurredAt : new Date().toISOString(),
+    eventType: typeof payload.eventType === "string" ? payload.eventType : "unknown",
+    source: payload.source ?? "unknown",
+    ok: Boolean(payload.ok),
+    tab: payload.tab && isBrowserTab(payload.tab) ? payload.tab : null
+  };
+
+  await mkdir(dirname(config.tabEventLogPath), { recursive: true });
+  await appendFile(config.tabEventLogPath, `${JSON.stringify(record)}\n`, "utf8");
+
+  console.log(
+    `[${new Date().toISOString()}] tab event ${record.eventType}: ok=${record.ok}, tab=${record.tab?.title ?? "(unknown)"}`
+  );
+
+  sendJson(response, 200, {
+    ok: true,
+    logged: true
+  });
+}
+
 async function handleRequest(request: IncomingMessage, response: ServerResponse, config: Config): Promise<void> {
   if (!request.url) {
     sendJson(response, 404, { ok: false, error: "Missing URL" });
@@ -738,11 +805,33 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return;
   }
 
+  if (request.method === "POST" && request.url === "/api/tab-switch") {
+    await handleTabSwitch(request, response, config);
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/api/tab-event") {
+    await handleTabEvent(request, response, config);
+    return;
+  }
+
   sendJson(response, 404, { ok: false, error: "Not found" });
+}
+
+async function ensureTabSwitchLogFile(config: Config): Promise<void> {
+  await mkdir(dirname(config.tabSwitchLogPath), { recursive: true });
+  await appendFile(config.tabSwitchLogPath, "", "utf8");
+}
+
+async function ensureTabEventLogFile(config: Config): Promise<void> {
+  await mkdir(dirname(config.tabEventLogPath), { recursive: true });
+  await appendFile(config.tabEventLogPath, "", "utf8");
 }
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  await ensureTabSwitchLogFile(config);
+  await ensureTabEventLogFile(config);
 
   const server = createServer((request, response) => {
     void handleRequest(request, response, config).catch((error: unknown) => {
@@ -761,6 +850,8 @@ async function main(): Promise<void> {
   console.log(JSON.stringify(config, null, 2));
   console.log(`POST tab snapshots to http://${config.host}:${config.port}/api/sync`);
   console.log(`POST selected text to http://${config.host}:${config.port}/api/tts-selection`);
+  console.log(`POST tab switches to http://${config.host}:${config.port}/api/tab-switch`);
+  console.log(`POST tab events to http://${config.host}:${config.port}/api/tab-event`);
 }
 
 void main().catch((error: unknown) => {

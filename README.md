@@ -55,6 +55,8 @@ Server defaults:
 - `HOST`: `127.0.0.1`
 - `PORT`: `3847`
 - `REPO_LIST_OUTPUT_PATH`: `/Users/smalex/Documents/home/indeed-repos.md`
+- `TAB_SWITCH_LOG_PATH`: `tab-switch-log.jsonl`
+- `TAB_EVENT_LOG_PATH`: `tabcoach-events.jsonl`
 - `TTS_CLIPBOARD_APP_PATH`: `/Users/smalex/bin/tts-clipboard`
 - `OPENAI_TRANSLATION_MODEL`: `gpt-4.1-mini`
 
@@ -79,7 +81,7 @@ The extension will:
 - auto-close duplicate tabs conservatively
 - group Google Docs, Sheets, and Slides tabs into a blue `Docs` tab group
 - show the duplicate-group count as the extension badge text
-- show, drag-reorder, bookmark, close, and switch between tabs in the current window with `Command+E` on macOS, including tab group labels and recently visited sorting
+- show, drag-reorder, bookmark, copy URLs, close, and switch between tabs in the current window with `Command+E` on macOS, including tab group labels and recently visited sorting
 - store bookmarks under `Tabcoach/<tab group name>` to keep saved tabs organized
 - send selected page text to the local TTS flow with `Command+Shift+S` on macOS
 - show a badge and notification when TTS is started successfully
@@ -126,6 +128,11 @@ Format:
 
 The file is cumulative. Repos, Jira tickets, and documents stay in the file even after their tabs are closed later.
 Document labels are read back from the saved Markdown links, so previously captured Google Docs names are preserved across later syncs.
+
+## Tab Switch Log
+
+Switching tabs through the `Command+E` modal posts to `POST /api/tab-switch`. The server appends JSON Lines to local `tab-switch-log.jsonl` by default, including timestamp, source, previous tab, and target tab.
+Copying a tab URL through the modal posts to `POST /api/tab-event`. The server appends JSON Lines to local `tabcoach-events.jsonl` by default.
 
 ## TTS Shortcut
 

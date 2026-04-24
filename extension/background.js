@@ -1,5 +1,7 @@
 const SERVER_URL = "http://127.0.0.1:3847/api/sync";
 const TTS_SELECTION_URL = "http://127.0.0.1:3847/api/tts-selection";
+const TAB_SWITCH_LOG_URL = "http://127.0.0.1:3847/api/tab-switch";
+const TAB_EVENT_LOG_URL = "http://127.0.0.1:3847/api/tab-event";
 const SYNC_ALARM = "tabcoach-sync";
 const SYNC_DEBOUNCE_MS = 1500;
 const AUTO_CLOSE_DUPLICATES = true;
@@ -14,6 +16,7 @@ const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
+const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
 
 const TRACKING_PARAMS = new Set([
@@ -654,7 +657,7 @@ async function showTabSwitcherModal() {
 
   await chrome.scripting.executeScript({
     target: { tabId: activeTab.id },
-    func: (tabs, modalId, switchTabMessage, closeTabMessage, moveTabMessage, toggleBookmarkMessage) => {
+    func: (tabs, modalId, switchTabMessage, closeTabMessage, moveTabMessage, toggleBookmarkMessage, copyTabUrlMessage) => {
       const existingModal = document.getElementById(modalId);
       if (existingModal) {
         existingModal.remove();
@@ -793,6 +796,40 @@ async function showTabSwitcherModal() {
             renderTabs();
             list.scrollTop = previousScrollTop;
           });
+      };
+
+      const copyTabUrl = (tabId) => {
+        const tab = tabs.find((item) => item.id === tabId);
+        if (!tab?.url) {
+          return Promise.resolve(false);
+        }
+
+        return navigator.clipboard
+          .writeText(tab.url)
+          .then(() => true)
+          .catch(() =>
+            chrome.runtime
+              .sendMessage({ type: copyTabUrlMessage, tabId, url: tab.url })
+              .then((response) => Boolean(response?.ok))
+          );
+      };
+
+      const logCopyTabUrl = (tab, copied) => {
+        void fetch(TAB_EVENT_LOG_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            eventType: "copy-tab-url",
+            occurredAt: new Date().toISOString(),
+            source: "chrome-extension:tab-switcher",
+            ok: copied,
+            tab
+          })
+        }).catch((error) => {
+          console.warn("Tabcoach tab event log failed", error);
+        });
       };
 
       const clearDropTarget = () => {
@@ -1058,7 +1095,7 @@ async function showTabSwitcherModal() {
           row.title = sortMode === "window" ? "Drag to reorder tabs" : "";
           Object.assign(row.style, {
             display: "grid",
-            gridTemplateColumns: "40px minmax(0, 1fr) auto 34px 34px",
+            gridTemplateColumns: "40px minmax(0, 1fr) auto 34px 34px 34px",
             alignItems: "center",
             gap: "12px",
             padding: "11px 12px",
@@ -1253,8 +1290,53 @@ async function showTabSwitcherModal() {
             bookmarkButton.style.border = "1px solid transparent";
           });
 
+          const copyUrlButton = document.createElement("button");
+          copyUrlButton.type = "button";
+          copyUrlButton.draggable = false;
+          copyUrlButton.textContent = "⧉";
+          copyUrlButton.setAttribute("aria-label", `Copy URL for ${tab.displayTitle || tab.title || tab.url || "tab"}`);
+          Object.assign(copyUrlButton.style, {
+            width: "28px",
+            height: "28px",
+            border: "1px solid transparent",
+            borderRadius: "6px",
+            background: "transparent",
+            color: "#d1d5db",
+            font: "21px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            cursor: "pointer",
+            padding: "0"
+          });
+          copyUrlButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void copyTabUrl(tab.id).then((copied) => {
+              copyUrlButton.textContent = copied ? "✓" : "!";
+              copyUrlButton.style.color = copied ? "#86efac" : "#fca5a5";
+              logCopyTabUrl(tab, copied);
+              setTimeout(() => {
+                copyUrlButton.textContent = "⧉";
+                copyUrlButton.style.color = "#d1d5db";
+              }, 900);
+            });
+          });
+          copyUrlButton.addEventListener("pointerdown", (event) => {
+            event.stopPropagation();
+          });
+          copyUrlButton.addEventListener("dragstart", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          });
+          copyUrlButton.addEventListener("mouseenter", () => {
+            copyUrlButton.style.background = "rgba(96, 165, 250, 0.14)";
+            copyUrlButton.style.border = "1px solid rgba(96, 165, 250, 0.38)";
+          });
+          copyUrlButton.addEventListener("mouseleave", () => {
+            copyUrlButton.style.background = "transparent";
+            copyUrlButton.style.border = "1px solid transparent";
+          });
+
           text.append(tabTitle, tabUrl);
-          row.append(icon, text, status, bookmarkButton, closeTabButton);
+          row.append(icon, text, status, bookmarkButton, copyUrlButton, closeTabButton);
           rows.push(row);
           list.appendChild(row);
         });
@@ -1296,7 +1378,7 @@ async function showTabSwitcherModal() {
       renderTabs();
       panel.focus();
     },
-    args: [tabItems, TAB_SWITCHER_MODAL_ID, SWITCH_TAB_MESSAGE, CLOSE_TAB_MESSAGE, MOVE_TAB_MESSAGE, TOGGLE_BOOKMARK_MESSAGE]
+    args: [tabItems, TAB_SWITCHER_MODAL_ID, SWITCH_TAB_MESSAGE, CLOSE_TAB_MESSAGE, MOVE_TAB_MESSAGE, TOGGLE_BOOKMARK_MESSAGE, COPY_TAB_URL_MESSAGE]
   });
 }
 
@@ -1315,6 +1397,21 @@ async function switchToTab(tabId, senderTab) {
   }
 
   await chrome.tabs.update(tabId, { active: true });
+
+  void fetch(TAB_SWITCH_LOG_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      source: "chrome-extension:tab-switcher",
+      switchedAt: new Date().toISOString(),
+      from: senderTab ? normalizeTab(senderTab) : null,
+      to: normalizeTab(targetTab)
+    })
+  }).catch((error) => {
+    console.warn("Tabcoach tab switch log failed", error);
+  });
 
   if (typeof targetTab.windowId === "number") {
     await chrome.windows.update(targetTab.windowId, { focused: true });
@@ -1424,6 +1521,23 @@ async function toggleBookmarkFromSwitcher(tabId, title, url, groupTitle, senderT
   return true;
 }
 
+async function copyTabUrlFromSwitcher(tabId, url, senderTab) {
+  if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
+    throw new Error("Invalid tab id");
+  }
+
+  if (typeof url !== "string" || url.length === 0) {
+    throw new Error("Invalid tab URL");
+  }
+
+  const targetTab = await chrome.tabs.get(tabId);
+  if (typeof senderTab?.windowId === "number" && targetTab.windowId !== senderTab.windowId) {
+    throw new Error("Cannot copy a tab URL outside the current window");
+  }
+
+  await navigator.clipboard.writeText(url);
+}
+
 function scheduleSync(reason) {
   if (pendingSyncTimer !== null) {
     clearTimeout(pendingSyncTimer);
@@ -1475,6 +1589,19 @@ chrome.tabs.onActivated.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === COPY_TAB_URL_MESSAGE) {
+    void copyTabUrlFromSwitcher(message.tabId, message.url, sender.tab)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error) => {
+        console.error("Tabcoach copy tab URL failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
   if (message?.type === TOGGLE_BOOKMARK_MESSAGE) {
     void toggleBookmarkFromSwitcher(message.tabId, message.title, message.url, message.groupTitle, sender.tab)
       .then((bookmarked) => {
