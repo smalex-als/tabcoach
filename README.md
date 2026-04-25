@@ -131,8 +131,8 @@ Document labels are read back from the saved Markdown links, so previously captu
 
 ## Tab Switch Log
 
-Switching tabs through the `Command+E` modal posts to `POST /api/tab-switch`. The server appends JSON Lines to local `tab-switch-log.jsonl` by default, including timestamp, source, previous tab, and target tab.
-Copying a tab URL through the modal posts to `POST /api/tab-event`. The server appends JSON Lines to local `tabcoach-events.jsonl` by default.
+Switching tabs through the `Command+E` popup posts to `POST /api/tab-switch`. The server appends JSON Lines to local `tab-switch-log.jsonl` by default, including timestamp, source, previous tab, and target tab.
+Copying a tab URL through the popup posts to `POST /api/tab-event`. The server appends JSON Lines to local `tabcoach-events.jsonl` by default.
 
 ## TTS Shortcut
 

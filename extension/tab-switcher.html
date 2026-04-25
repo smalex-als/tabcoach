@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tabcoach</title>
+    <link rel="stylesheet" href="tab-switcher.css">
+  </head>
+  <body>
+    <main class="shell" aria-label="Tabcoach tabs">
+      <header class="toolbar">
+        <div class="title" id="title">Tabs</div>
+        <div class="sort-controls" role="group" aria-label="Sort tabs">
+          <button class="sort-button" type="button" data-sort-mode="window">Window order</button>
+          <button class="sort-button" type="button" data-sort-mode="recent">Recently visited</button>
+        </div>
+        <button class="close-button" type="button" id="closeButton">Close</button>
+      </header>
+      <div class="list" id="list" role="listbox" aria-label="Tabs in this window"></div>
+    </main>
+    <script src="tab-switcher.js"></script>
+  </body>
+</html>

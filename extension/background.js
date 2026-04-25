@@ -12,7 +12,8 @@ const DOCS_GROUP_COLOR = "blue";
 const TRANSIENT_RETRY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_DELAY_MS = 500;
 const TTS_SUCCESS_BADGE_MS = 3000;
-const TAB_SWITCHER_MODAL_ID = "__tabcoach_tab_switcher_modal";
+const TAB_SWITCHER_PAGE = "tab-switcher.html";
+const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
@@ -39,6 +40,7 @@ const TRACKING_PARAMS = new Set([
 
 let pendingSyncTimer = null;
 let badgeResetTimer = null;
+let tabSwitcherPopupWindowId = null;
 const recentTabCreations = new Map();
 
 function delay(ms) {
@@ -699,755 +701,76 @@ async function collectTabSwitcherItems(windowId) {
   return addTabDisplayTitles(items);
 }
 
-async function showTabSwitcherModal() {
-  const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+async function openTabSwitcherPopup() {
+  const focusedWindow = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+  const [activeTab] = typeof focusedWindow?.id === "number" ? await chrome.tabs.query({ active: true, windowId: focusedWindow.id }) : [];
 
-  if (!activeTab?.id) {
+  if (!activeTab?.id || typeof activeTab.windowId !== "number") {
     throw new Error("No active tab");
   }
 
-  const tabItems = await collectTabSwitcherItems(activeTab.windowId);
+  const popupUrl = chrome.runtime.getURL(`${TAB_SWITCHER_PAGE}?windowId=${activeTab.windowId}`);
 
-  await chrome.scripting.executeScript({
-    target: { tabId: activeTab.id },
-    func: (tabs, modalId, switchTabMessage, closeTabMessage, moveTabMessage, toggleBookmarkMessage, copyTabUrlMessage, logTabEventMessage) => {
-      const existingModal = document.getElementById(modalId);
-      if (existingModal) {
-        existingModal.remove();
+  if (typeof tabSwitcherPopupWindowId === "number") {
+    try {
+      const [popupTab] = await chrome.tabs.query({ windowId: tabSwitcherPopupWindowId });
+      if (typeof popupTab?.id === "number") {
+        await chrome.tabs.update(popupTab.id, { url: popupUrl });
       }
-
-      let sortMode = "window";
-      let visibleTabs = [...tabs];
-      let selectedIndex = Math.max(
-        0,
-        visibleTabs.findIndex((tab) => tab.active)
-      );
-      let draggedTabId = null;
-      let dropTarget = null;
-      const rows = [];
-      const groupColors = {
-        grey: "#9ca3af",
-        blue: "#60a5fa",
-        red: "#f87171",
-        yellow: "#facc15",
-        green: "#4ade80",
-        pink: "#f472b6",
-        purple: "#c084fc",
-        cyan: "#22d3ee",
-        orange: "#fb923c"
-      };
-
-      const formatUrl = (rawUrl) => {
-        try {
-          const parsed = new URL(rawUrl);
-          return `${parsed.hostname}${parsed.pathname === "/" ? "" : parsed.pathname}`;
-        } catch {
-          return rawUrl;
-        }
-      };
-
-      const sortTabs = () => {
-        visibleTabs = [...tabs];
-
-        if (sortMode === "recent") {
-          visibleTabs.sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0));
-        }
-      };
-
-      const closeModal = () => {
-        document.getElementById(modalId)?.remove();
-        document.removeEventListener("keydown", handleKeydown, true);
-      };
-
-      const applyRowState = (scrollBlock = "nearest") => {
-        rows.forEach((row, index) => {
-          const isSelected = index === selectedIndex;
-          const isActive = row.dataset.tabcoachActive === "true";
-          row.setAttribute("aria-selected", String(isSelected));
-          row.style.background = isSelected
-            ? "rgba(129, 140, 248, 0.34)"
-            : isActive
-              ? "rgba(99, 102, 241, 0.22)"
-              : "transparent";
-          row.style.border = isSelected
-            ? "1px solid rgba(199, 210, 254, 0.82)"
-            : isActive
-              ? "1px solid rgba(129, 140, 248, 0.55)"
-              : "1px solid transparent";
-        });
-
-        rows[selectedIndex]?.scrollIntoView({ block: scrollBlock });
-      };
-
-      const selectRelative = (offset) => {
-        if (rows.length === 0) {
-          return;
-        }
-
-        selectedIndex = (selectedIndex + offset + rows.length) % rows.length;
-        applyRowState();
-      };
-
-      const switchToSelectedTab = () => {
-        const row = rows[selectedIndex];
-        const tabId = Number(row?.dataset.tabcoachTabId);
-        if (!Number.isFinite(tabId)) {
-          return;
-        }
-
-        void chrome.runtime.sendMessage({ type: switchTabMessage, tabId }).finally(closeModal);
-      };
-
-      const closeTab = (tabId) => {
-        void chrome.runtime
-          .sendMessage({ type: closeTabMessage, tabId })
-          .then((response) => {
-            if (!response?.ok) {
-              return;
-            }
-
-            const closedIndex = visibleTabs.findIndex((tab) => tab.id === tabId);
-            tabs = tabs.filter((tab) => tab.id !== tabId);
-            sortTabs();
-
-            if (visibleTabs.length === 0) {
-              closeModal();
-              return;
-            }
-
-            selectedIndex = Math.min(
-              closedIndex >= 0 ? closedIndex : selectedIndex,
-              visibleTabs.length - 1
-            );
-            renderTabs();
-            title.textContent = `Tabs in this window (${visibleTabs.length})`;
-          });
-      };
-
-      const toggleBookmark = (tabId) => {
-        const tab = tabs.find((item) => item.id === tabId);
-        if (!tab) {
-          return;
-        }
-
-        void chrome.runtime
-          .sendMessage({
-            type: toggleBookmarkMessage,
-            tabId,
-            title: tab.displayTitle || tab.title || tab.url || "Untitled tab",
-            url: tab.url,
-            groupTitle: tab.group?.title || "Ungrouped"
-          })
-          .then((response) => {
-            if (!response?.ok) {
-              return;
-            }
-
-            const previousScrollTop = list.scrollTop;
-            tabs = tabs.map((item) => (item.id === tabId ? { ...item, bookmarked: response.bookmarked } : item));
-            sortTabs();
-            renderTabs();
-            list.scrollTop = previousScrollTop;
-          });
-      };
-
-      const copyTabUrl = (tabId) => {
-        const tab = tabs.find((item) => item.id === tabId);
-        if (!tab?.url) {
-          return Promise.resolve(false);
-        }
-
-        return navigator.clipboard
-          .writeText(tab.url)
-          .then(() => true)
-          .catch(() =>
-            chrome.runtime
-              .sendMessage({ type: copyTabUrlMessage, tabId, url: tab.url })
-              .then((response) => Boolean(response?.ok))
-          );
-      };
-
-      const logCopyTabUrl = (tab, copied) => {
-        void chrome.runtime.sendMessage({
-          type: logTabEventMessage,
-          eventType: "copy-tab-url",
-          occurredAt: new Date().toISOString(),
-          source: "chrome-extension:tab-switcher",
-          ok: copied,
-          tab
-        }).catch((error) => {
-          console.warn("Tabcoach tab event log failed", error);
-        });
-      };
-
-      const clearDropTarget = () => {
-        dropTarget = null;
-        rows.forEach((row) => {
-          row.style.boxShadow = "";
-        });
-      };
-
-      const updateDropTarget = (row, position) => {
-        clearDropTarget();
-        dropTarget = {
-          tabId: Number(row.dataset.tabcoachTabId),
-          groupId: Number(row.dataset.tabcoachGroupId),
-          position
-        };
-        row.style.boxShadow = position === "before"
-          ? "inset 0 3px 0 #a5b4fc"
-          : "inset 0 -3px 0 #a5b4fc";
-      };
-
-      const moveDraggedTab = () => {
-        if (sortMode !== "window" || draggedTabId === null || dropTarget === null || draggedTabId === dropTarget.tabId) {
-          clearDropTarget();
-          return;
-        }
-
-        const orderedIds = tabs.map((tab) => tab.id).filter((tabId) => tabId !== draggedTabId);
-        const targetIndex = orderedIds.indexOf(dropTarget.tabId);
-        if (targetIndex < 0) {
-          clearDropTarget();
-          return;
-        }
-
-        orderedIds.splice(dropTarget.position === "before" ? targetIndex : targetIndex + 1, 0, draggedTabId);
-        const moveToIndex = orderedIds.indexOf(draggedTabId);
-        const targetGroupId = Number.isInteger(dropTarget.groupId) ? dropTarget.groupId : -1;
-        const selectedTabId = Number(rows[selectedIndex]?.dataset.tabcoachTabId);
-
-        clearDropTarget();
-        void chrome.runtime
-          .sendMessage({ type: moveTabMessage, tabId: draggedTabId, index: moveToIndex, groupId: targetGroupId })
-          .then((response) => {
-            if (!response?.ok || !Array.isArray(response.tabs)) {
-              return;
-            }
-
-            tabs = response.tabs;
-            sortTabs();
-            selectedIndex = Math.max(
-              0,
-              visibleTabs.findIndex((tab) => tab.id === selectedTabId || tab.id === draggedTabId)
-            );
-            renderTabs();
-          })
-          .finally(() => {
-            draggedTabId = null;
-          });
-      };
-
-      const handleKeydown = (event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          closeModal();
-          return;
-        }
-
-        if (event.key === "ArrowDown") {
-          event.preventDefault();
-          selectRelative(1);
-          return;
-        }
-
-        if (event.key === "ArrowUp") {
-          event.preventDefault();
-          selectRelative(-1);
-          return;
-        }
-
-        if (event.key === "Enter") {
-          event.preventDefault();
-          switchToSelectedTab();
-        }
-      };
-
-      const overlay = document.createElement("div");
-      overlay.id = modalId;
-      overlay.setAttribute("role", "dialog");
-      overlay.setAttribute("aria-modal", "true");
-      overlay.setAttribute("aria-label", "Tabcoach tabs");
-      Object.assign(overlay.style, {
-        position: "fixed",
-        inset: "0",
-        zIndex: "2147483647",
-        display: "flex",
-        alignItems: "flex-start",
-        justifyContent: "center",
-        padding: "10vh 18px 18px",
-        background: "rgba(15, 23, 42, 0.42)",
-        boxSizing: "border-box",
-        font: "16px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-      });
-
-      const panel = document.createElement("div");
-      panel.tabIndex = -1;
-      Object.assign(panel.style, {
-        width: "min(920px, 100%)",
-        height: "min(80vh, calc(100vh - 36px))",
-        overflow: "hidden",
-        borderRadius: "8px",
-        background: "#1f2937",
-        color: "#f9fafb",
-        boxShadow: "0 24px 80px rgba(0, 0, 0, 0.32)",
-        border: "1px solid rgba(148, 163, 184, 0.3)"
-      });
-
-      const header = document.createElement("div");
-      Object.assign(header.style, {
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: "16px",
-        padding: "14px 16px",
-        borderBottom: "1px solid rgba(148, 163, 184, 0.24)"
-      });
-
-      const title = document.createElement("div");
-      title.textContent = `Tabs in this window (${tabs.length})`;
-      Object.assign(title.style, {
-        fontSize: "18px",
-        fontWeight: "650"
-      });
-
-      const closeButton = document.createElement("button");
-      closeButton.type = "button";
-      closeButton.textContent = "Close";
-      Object.assign(closeButton.style, {
-        border: "1px solid rgba(148, 163, 184, 0.42)",
-        borderRadius: "6px",
-        background: "#374151",
-        color: "#f9fafb",
-        padding: "8px 12px",
-        font: "15px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-        cursor: "pointer"
-      });
-      closeButton.addEventListener("click", closeModal);
-
-      const sortControls = document.createElement("div");
-      Object.assign(sortControls.style, {
-        display: "flex",
-        alignItems: "center",
-        gap: "6px",
-        marginLeft: "auto"
-      });
-
-      const createSortButton = (mode, label) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = label;
-        button.dataset.tabcoachSortMode = mode;
-        Object.assign(button.style, {
-          border: "1px solid rgba(148, 163, 184, 0.42)",
-          borderRadius: "6px",
-          background: "#374151",
-          color: "#f9fafb",
-          padding: "8px 10px",
-          font: "15px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-          cursor: "pointer"
-        });
-        button.addEventListener("click", () => {
-          const selectedTabId = Number(rows[selectedIndex]?.dataset.tabcoachTabId);
-          const previousScrollTop = list.scrollTop;
-          sortMode = mode;
-          sortTabs();
-          selectedIndex = Math.max(
-            0,
-            visibleTabs.findIndex((tab) => tab.id === selectedTabId)
-          );
-          renderTabs();
-          list.scrollTop = previousScrollTop;
-        });
-        return button;
-      };
-
-      const windowOrderButton = createSortButton("window", "Window order");
-      const recentOrderButton = createSortButton("recent", "Recently visited");
-      sortControls.append(windowOrderButton, recentOrderButton);
-
-      const list = document.createElement("div");
-      list.setAttribute("role", "listbox");
-      list.setAttribute("aria-label", "Tabs in this window");
-      Object.assign(list.style, {
-        height: "calc(100% - 57px)",
-        overflowY: "auto",
-        padding: "6px"
-      });
-
-      const updateSortButtons = () => {
-        for (const button of [windowOrderButton, recentOrderButton]) {
-          const isActive = button.dataset.tabcoachSortMode === sortMode;
-          button.style.background = isActive ? "#6366f1" : "#374151";
-          button.style.border = isActive ? "1px solid rgba(199, 210, 254, 0.78)" : "1px solid rgba(148, 163, 184, 0.42)";
-        }
-      };
-
-      const renderTabs = ({ scrollBlock = "nearest" } = {}) => {
-        rows.length = 0;
-        list.replaceChildren();
-        updateSortButtons();
-
-        const showGroupSections = sortMode === "window" && visibleTabs.some((tab) => tab.group);
-        let lastSectionKey = null;
-
-        visibleTabs.forEach((tab, index) => {
-          if (showGroupSections) {
-            const sectionKey = tab.group ? `group:${tab.group.id}` : "ungrouped";
-            if (sectionKey !== lastSectionKey) {
-              const sectionHeader = document.createElement("div");
-              Object.assign(sectionHeader.style, {
-                display: "flex",
-                alignItems: "center",
-                gap: "9px",
-                padding: index === 0 ? "8px 10px 6px" : "18px 10px 6px",
-                color: "#e5e7eb",
-                fontSize: "13px",
-                fontWeight: "700",
-                textTransform: "uppercase",
-                letterSpacing: "0"
-              });
-
-              const swatch = document.createElement("span");
-              Object.assign(swatch.style, {
-                width: "10px",
-                height: "10px",
-                borderRadius: "999px",
-                background: tab.group ? groupColors[tab.group.color] ?? groupColors.grey : "#6b7280",
-                flex: "0 0 auto"
-              });
-
-              const sectionTitle = document.createElement("span");
-              sectionTitle.textContent = tab.group
-                ? `${tab.group.title || "Unnamed group"}${tab.group.collapsed ? " (collapsed)" : ""}`
-                : "Ungrouped";
-              Object.assign(sectionTitle.style, {
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap"
-              });
-
-              sectionHeader.append(swatch, sectionTitle);
-              list.appendChild(sectionHeader);
-              lastSectionKey = sectionKey;
-            }
-          }
-
-          const row = document.createElement("div");
-          row.setAttribute("role", "option");
-          row.tabIndex = -1;
-          row.draggable = sortMode === "window";
-          row.dataset.tabcoachTabId = String(tab.id ?? "");
-          row.dataset.tabcoachGroupId = String(tab.group?.id ?? -1);
-          row.dataset.tabcoachActive = String(Boolean(tab.active));
-          row.title = sortMode === "window" ? "Drag to reorder tabs" : "";
-          Object.assign(row.style, {
-            display: "grid",
-            gridTemplateColumns: "40px minmax(0, 1fr) auto 34px 34px 34px",
-            alignItems: "center",
-            gap: "12px",
-            padding: "11px 12px",
-            borderRadius: "6px",
-            background: tab.active ? "rgba(99, 102, 241, 0.22)" : "transparent",
-            border: tab.active ? "1px solid rgba(129, 140, 248, 0.55)" : "1px solid transparent",
-            cursor: "pointer"
-          });
-          row.addEventListener("mouseenter", () => {
-            selectedIndex = index;
-            applyRowState();
-          });
-          row.addEventListener("click", () => {
-            selectedIndex = index;
-            switchToSelectedTab();
-          });
-          row.addEventListener("dragstart", (event) => {
-            if (sortMode !== "window") {
-              event.preventDefault();
-              return;
-            }
-
-            if (event.target instanceof HTMLElement && event.target.closest("button")) {
-              event.preventDefault();
-              return;
-            }
-
-            draggedTabId = tab.id;
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", String(tab.id));
-            row.style.opacity = "0.55";
-          });
-          row.addEventListener("dragend", () => {
-            row.style.opacity = "1";
-            clearDropTarget();
-            draggedTabId = null;
-          });
-          row.addEventListener("dragover", (event) => {
-            if (sortMode !== "window" || draggedTabId === null || draggedTabId === tab.id) {
-              return;
-            }
-
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "move";
-            const rect = row.getBoundingClientRect();
-            updateDropTarget(row, event.clientY < rect.top + rect.height / 2 ? "before" : "after");
-          });
-          row.addEventListener("drop", (event) => {
-            if (sortMode !== "window") {
-              return;
-            }
-
-            event.preventDefault();
-            event.stopPropagation();
-            moveDraggedTab();
-          });
-
-          const icon = document.createElement("div");
-          icon.draggable = false;
-          Object.assign(icon.style, {
-            width: "32px",
-            height: "32px",
-            borderRadius: "6px",
-            overflow: "hidden",
-            background: "#4b5563"
-          });
-
-          if (tab.favIconUrl) {
-            const image = document.createElement("img");
-            image.src = tab.favIconUrl;
-            image.alt = "";
-            image.draggable = false;
-            Object.assign(image.style, {
-              width: "32px",
-              height: "32px",
-              display: "block"
-            });
-            icon.appendChild(image);
-          }
-
-          const text = document.createElement("div");
-          Object.assign(text.style, {
-            minWidth: "0"
-          });
-
-          const tabTitle = document.createElement("div");
-          tabTitle.textContent = tab.displayTitle || tab.title || tab.url || "Untitled tab";
-          Object.assign(tabTitle.style, {
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            fontWeight: tab.active ? "650" : "500"
-          });
-
-          const tabUrl = document.createElement("div");
-          tabUrl.textContent = formatUrl(tab.url);
-          Object.assign(tabUrl.style, {
-            marginTop: "2px",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            color: "#d1d5db",
-            fontSize: "14px"
-          });
-
-          const status = document.createElement("div");
-          status.textContent = [tab.active ? "Active" : "", tab.pinned ? "Pinned" : ""].filter(Boolean).join(" ");
-          Object.assign(status.style, {
-            color: "#c7d2fe",
-            fontSize: "14px",
-            fontWeight: "650",
-            minWidth: "58px",
-            textAlign: "right"
-          });
-
-          const closeTabButton = document.createElement("button");
-          closeTabButton.type = "button";
-          closeTabButton.draggable = false;
-          closeTabButton.textContent = "×";
-          closeTabButton.setAttribute("aria-label", `Close ${tab.displayTitle || tab.title || tab.url || "tab"}`);
-          Object.assign(closeTabButton.style, {
-            width: "28px",
-            height: "28px",
-            border: "1px solid transparent",
-            borderRadius: "6px",
-            background: "transparent",
-            color: "#d1d5db",
-            font: "22px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-            cursor: "pointer",
-            padding: "0"
-          });
-          closeTabButton.addEventListener("click", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            closeTab(tab.id);
-          });
-          closeTabButton.addEventListener("pointerdown", (event) => {
-            event.stopPropagation();
-          });
-          closeTabButton.addEventListener("dragstart", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-          });
-          closeTabButton.addEventListener("mouseenter", () => {
-            closeTabButton.style.background = "rgba(248, 113, 113, 0.16)";
-            closeTabButton.style.color = "#fecaca";
-            closeTabButton.style.border = "1px solid rgba(248, 113, 113, 0.42)";
-          });
-          closeTabButton.addEventListener("mouseleave", () => {
-            closeTabButton.style.background = "transparent";
-            closeTabButton.style.color = "#d1d5db";
-            closeTabButton.style.border = "1px solid transparent";
-          });
-
-          const bookmarkButton = document.createElement("button");
-          bookmarkButton.type = "button";
-          bookmarkButton.draggable = false;
-          bookmarkButton.textContent = tab.bookmarked ? "★" : "☆";
-          bookmarkButton.setAttribute(
-            "aria-label",
-            `${tab.bookmarked ? "Remove bookmark for" : "Bookmark"} ${tab.displayTitle || tab.title || tab.url || "tab"}`
-          );
-          Object.assign(bookmarkButton.style, {
-            width: "28px",
-            height: "28px",
-            border: "1px solid transparent",
-            borderRadius: "6px",
-            background: "transparent",
-            color: tab.bookmarked ? "#facc15" : "#d1d5db",
-            font: "22px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-            cursor: "pointer",
-            padding: "0"
-          });
-          bookmarkButton.addEventListener("click", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            toggleBookmark(tab.id);
-          });
-          bookmarkButton.addEventListener("pointerdown", (event) => {
-            event.stopPropagation();
-          });
-          bookmarkButton.addEventListener("dragstart", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-          });
-          bookmarkButton.addEventListener("mouseenter", () => {
-            bookmarkButton.style.background = "rgba(250, 204, 21, 0.14)";
-            bookmarkButton.style.border = "1px solid rgba(250, 204, 21, 0.38)";
-          });
-          bookmarkButton.addEventListener("mouseleave", () => {
-            bookmarkButton.style.background = "transparent";
-            bookmarkButton.style.border = "1px solid transparent";
-          });
-
-          const copyUrlButton = document.createElement("button");
-          copyUrlButton.type = "button";
-          copyUrlButton.draggable = false;
-          copyUrlButton.textContent = "⧉";
-          copyUrlButton.setAttribute("aria-label", `Copy URL for ${tab.displayTitle || tab.title || tab.url || "tab"}`);
-          Object.assign(copyUrlButton.style, {
-            width: "28px",
-            height: "28px",
-            border: "1px solid transparent",
-            borderRadius: "6px",
-            background: "transparent",
-            color: "#d1d5db",
-            font: "21px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-            cursor: "pointer",
-            padding: "0"
-          });
-          copyUrlButton.addEventListener("click", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            void copyTabUrl(tab.id).then((copied) => {
-              copyUrlButton.textContent = copied ? "✓" : "!";
-              copyUrlButton.style.color = copied ? "#86efac" : "#fca5a5";
-              logCopyTabUrl(tab, copied);
-              setTimeout(() => {
-                copyUrlButton.textContent = "⧉";
-                copyUrlButton.style.color = "#d1d5db";
-              }, 900);
-            });
-          });
-          copyUrlButton.addEventListener("pointerdown", (event) => {
-            event.stopPropagation();
-          });
-          copyUrlButton.addEventListener("dragstart", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-          });
-          copyUrlButton.addEventListener("mouseenter", () => {
-            copyUrlButton.style.background = "rgba(96, 165, 250, 0.14)";
-            copyUrlButton.style.border = "1px solid rgba(96, 165, 250, 0.38)";
-          });
-          copyUrlButton.addEventListener("mouseleave", () => {
-            copyUrlButton.style.background = "transparent";
-            copyUrlButton.style.border = "1px solid transparent";
-          });
-
-          text.append(tabTitle, tabUrl);
-          row.append(icon, text, status, bookmarkButton, copyUrlButton, closeTabButton);
-          rows.push(row);
-          list.appendChild(row);
-        });
-
-        applyRowState(scrollBlock);
-      };
-
-      header.append(title, sortControls, closeButton);
-      panel.append(header, list);
-      overlay.appendChild(panel);
-      list.addEventListener("dragover", (event) => {
-        if (sortMode !== "window" || draggedTabId === null || rows.length === 0) {
-          return;
-        }
-
-        event.preventDefault();
-        const lastRow = rows[rows.length - 1];
-        const lastRect = lastRow.getBoundingClientRect();
-        if (event.clientY > lastRect.bottom) {
-          updateDropTarget(lastRow, "after");
-        }
-      });
-      list.addEventListener("drop", (event) => {
-        if (sortMode !== "window") {
-          return;
-        }
-
-        event.preventDefault();
-        moveDraggedTab();
-      });
-      overlay.addEventListener("click", (event) => {
-        if (event.target === overlay) {
-          closeModal();
-        }
-      });
-      document.addEventListener("keydown", handleKeydown, true);
-      document.documentElement.appendChild(overlay);
-      sortTabs();
-      renderTabs({ scrollBlock: "center" });
-      panel.focus();
-    },
-    args: [
-      tabItems,
-      TAB_SWITCHER_MODAL_ID,
-      SWITCH_TAB_MESSAGE,
-      CLOSE_TAB_MESSAGE,
-      MOVE_TAB_MESSAGE,
-      TOGGLE_BOOKMARK_MESSAGE,
-      COPY_TAB_URL_MESSAGE,
-      LOG_TAB_EVENT_MESSAGE
-    ]
+      await chrome.windows.update(tabSwitcherPopupWindowId, { focused: true });
+      return;
+    } catch {
+      tabSwitcherPopupWindowId = null;
+    }
+  }
+
+  const popupWindow = await chrome.windows.create({
+    url: popupUrl,
+    type: "popup",
+    width: 940,
+    height: 720,
+    focused: true
   });
+  tabSwitcherPopupWindowId = typeof popupWindow.id === "number" ? popupWindow.id : null;
 }
 
-async function switchToTab(tabId, senderTab) {
+function getSwitcherContextWindowId(context) {
+  if (typeof context?.windowId === "number") {
+    return context.windowId;
+  }
+
+  if (typeof context?.senderTab?.windowId === "number") {
+    return context.senderTab.windowId;
+  }
+
+  return null;
+}
+
+function assertTabInSwitcherWindow(targetTab, context, action) {
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId === "number" && targetTab.windowId !== windowId) {
+    throw new Error(`Cannot ${action} a tab outside the current window`);
+  }
+}
+
+async function getActiveTabInWindow(windowId) {
+  if (typeof windowId !== "number") {
+    return null;
+  }
+
+  const [activeTab] = await chrome.tabs.query({ active: true, windowId });
+  return activeTab ?? null;
+}
+
+async function switchToTab(tabId, context = {}) {
   if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
     throw new Error("Invalid tab id");
   }
 
   const targetTab = await chrome.tabs.get(tabId);
-  if (typeof senderTab?.windowId === "number" && targetTab.windowId !== senderTab.windowId) {
-    throw new Error("Cannot switch to a tab outside the current window");
-  }
+  assertTabInSwitcherWindow(targetTab, context, "switch to");
+  const sourceWindowId = getSwitcherContextWindowId(context);
+  const fromTab = context.senderTab ?? (await getActiveTabInWindow(sourceWindowId));
 
   if (typeof targetTab.groupId === "number" && targetTab.groupId >= 0) {
     await chrome.tabGroups.update(targetTab.groupId, { collapsed: false });
@@ -1463,7 +786,7 @@ async function switchToTab(tabId, senderTab) {
     body: JSON.stringify({
       source: "chrome-extension:tab-switcher",
       switchedAt: new Date().toISOString(),
-      from: senderTab ? normalizeTab(senderTab) : null,
+      from: fromTab ? normalizeTab(fromTab) : null,
       to: normalizeTab(targetTab)
     })
   }).catch((error) => {
@@ -1475,20 +798,18 @@ async function switchToTab(tabId, senderTab) {
   }
 }
 
-async function closeTabFromSwitcher(tabId, senderTab) {
+async function closeTabFromSwitcher(tabId, context = {}) {
   if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
     throw new Error("Invalid tab id");
   }
 
   const targetTab = await chrome.tabs.get(tabId);
-  if (typeof senderTab?.windowId === "number" && targetTab.windowId !== senderTab.windowId) {
-    throw new Error("Cannot close a tab outside the current window");
-  }
+  assertTabInSwitcherWindow(targetTab, context, "close");
 
   await chrome.tabs.remove(tabId);
 }
 
-async function moveTabFromSwitcher(tabId, index, groupId, senderTab) {
+async function moveTabFromSwitcher(tabId, index, groupId, context = {}) {
   if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
     throw new Error("Invalid tab id");
   }
@@ -1498,9 +819,7 @@ async function moveTabFromSwitcher(tabId, index, groupId, senderTab) {
   }
 
   const targetTab = await chrome.tabs.get(tabId);
-  if (typeof senderTab?.windowId === "number" && targetTab.windowId !== senderTab.windowId) {
-    throw new Error("Cannot move a tab outside the current window");
-  }
+  assertTabInSwitcherWindow(targetTab, context, "move");
 
   if (typeof groupId === "number" && Number.isInteger(groupId) && groupId >= 0) {
     const targetGroup = await chrome.tabGroups.get(groupId);
@@ -1546,7 +865,7 @@ function normalizeBookmarkFolderTitle(title) {
   return normalized || "Ungrouped";
 }
 
-async function toggleBookmarkFromSwitcher(tabId, title, url, groupTitle, senderTab) {
+async function toggleBookmarkFromSwitcher(tabId, title, url, groupTitle, context = {}) {
   if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
     throw new Error("Invalid tab id");
   }
@@ -1556,9 +875,7 @@ async function toggleBookmarkFromSwitcher(tabId, title, url, groupTitle, senderT
   }
 
   const targetTab = await chrome.tabs.get(tabId);
-  if (typeof senderTab?.windowId === "number" && targetTab.windowId !== senderTab.windowId) {
-    throw new Error("Cannot bookmark a tab outside the current window");
-  }
+  assertTabInSwitcherWindow(targetTab, context, "bookmark");
 
   const existingBookmarks = await chrome.bookmarks.search({ url });
   const existingBookmark = existingBookmarks.find((bookmark) => bookmark.url === url);
@@ -1578,7 +895,7 @@ async function toggleBookmarkFromSwitcher(tabId, title, url, groupTitle, senderT
   return true;
 }
 
-async function copyTabUrlFromSwitcher(tabId, url, senderTab) {
+async function copyTabUrlFromSwitcher(tabId, url, context = {}) {
   if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
     throw new Error("Invalid tab id");
   }
@@ -1588,9 +905,7 @@ async function copyTabUrlFromSwitcher(tabId, url, senderTab) {
   }
 
   const targetTab = await chrome.tabs.get(tabId);
-  if (typeof senderTab?.windowId === "number" && targetTab.windowId !== senderTab.windowId) {
-    throw new Error("Cannot copy a tab URL outside the current window");
-  }
+  assertTabInSwitcherWindow(targetTab, context, "copy");
 
   await navigator.clipboard.writeText(url);
 }
@@ -1665,7 +980,36 @@ chrome.tabs.onActivated.addListener(() => {
   scheduleSync("tab-activated");
 });
 
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (windowId === tabSwitcherPopupWindowId) {
+    tabSwitcherPopupWindowId = null;
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const switcherContext = {
+    senderTab: sender.tab,
+    windowId: typeof message?.windowId === "number" ? message.windowId : null
+  };
+
+  if (message?.type === GET_TAB_SWITCHER_ITEMS_MESSAGE) {
+    if (typeof message.windowId !== "number") {
+      sendResponse({ ok: false, error: "Invalid window id" });
+      return false;
+    }
+
+    void collectTabSwitcherItems(message.windowId)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach tab switcher item collection failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
   if (message?.type === LOG_TAB_EVENT_MESSAGE) {
     void logTabEventFromSwitcher(message)
       .then(() => {
@@ -1680,7 +1024,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === COPY_TAB_URL_MESSAGE) {
-    void copyTabUrlFromSwitcher(message.tabId, message.url, sender.tab)
+    void copyTabUrlFromSwitcher(message.tabId, message.url, switcherContext)
       .then(() => {
         sendResponse({ ok: true });
       })
@@ -1693,7 +1037,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === TOGGLE_BOOKMARK_MESSAGE) {
-    void toggleBookmarkFromSwitcher(message.tabId, message.title, message.url, message.groupTitle, sender.tab)
+    void toggleBookmarkFromSwitcher(message.tabId, message.title, message.url, message.groupTitle, switcherContext)
       .then((bookmarked) => {
         sendResponse({ ok: true, bookmarked });
       })
@@ -1706,7 +1050,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === MOVE_TAB_MESSAGE) {
-    void moveTabFromSwitcher(message.tabId, message.index, message.groupId, sender.tab)
+    void moveTabFromSwitcher(message.tabId, message.index, message.groupId, switcherContext)
       .then((tabs) => {
         sendResponse({ ok: true, tabs });
       })
@@ -1719,7 +1063,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === CLOSE_TAB_MESSAGE) {
-    void closeTabFromSwitcher(message.tabId, sender.tab)
+    void closeTabFromSwitcher(message.tabId, switcherContext)
       .then(() => {
         sendResponse({ ok: true });
       })
@@ -1735,7 +1079,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  void switchToTab(message.tabId, sender.tab)
+  void switchToTab(message.tabId, switcherContext)
     .then(() => {
       sendResponse({ ok: true });
     })
@@ -1749,7 +1093,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.commands.onCommand.addListener((command) => {
   if (command === "show-tab-switcher") {
-    void showTabSwitcherModal().catch((error) => {
+    void openTabSwitcherPopup().catch((error) => {
       console.error("Tabcoach tab switcher failed", error);
     });
     return;
