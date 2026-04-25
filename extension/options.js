@@ -4,6 +4,7 @@ const DEFAULT_SETTINGS = {
   docsGrouping: true,
   fetchDiagnostics: true,
   syncIntervalMinutes: 1,
+  switcherOpenLeft: false,
   badgeMode: "both"
 };
 
@@ -16,6 +17,7 @@ const fields = {
   docsGrouping: document.getElementById("docsGrouping"),
   fetchDiagnostics: document.getElementById("fetchDiagnostics"),
   syncIntervalMinutes: document.getElementById("syncIntervalMinutes"),
+  switcherOpenLeft: document.getElementById("switcherOpenLeft"),
   badgeMode: document.getElementById("badgeMode")
 };
 
@@ -44,6 +46,7 @@ function readFormSettings() {
     docsGrouping: fields.docsGrouping.checked,
     fetchDiagnostics: fields.fetchDiagnostics.checked,
     syncIntervalMinutes: Number(fields.syncIntervalMinutes.value),
+    switcherOpenLeft: fields.switcherOpenLeft.checked,
     badgeMode: fields.badgeMode.value
   };
 }
@@ -54,6 +57,7 @@ function writeFormSettings(settings) {
   fields.docsGrouping.checked = Boolean(settings.docsGrouping);
   fields.fetchDiagnostics.checked = Boolean(settings.fetchDiagnostics);
   fields.syncIntervalMinutes.value = String(settings.syncIntervalMinutes);
+  fields.switcherOpenLeft.checked = Boolean(settings.switcherOpenLeft);
   fields.badgeMode.value = settings.badgeMode;
 }
 

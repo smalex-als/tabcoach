@@ -1,11 +1,15 @@
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
+const JUMP_NUMERIC_BOOKMARK_MESSAGE = "tabcoach:jump-numeric-bookmark";
+const POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE = "tabcoach:popup-numeric-bookmark-command";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
+const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
+const SWITCHER_OPEN_LEFT_KEY = "switcherOpenLeft";
 
 const groupColors = {
   grey: "#9ca3af",
@@ -45,11 +49,14 @@ const sortButtons = [...document.querySelectorAll(".sort-button")];
 
 let tabs = [];
 let duplicateCountsByTabId = new Map();
+let numericBookmarks = {};
+let numericBookmarkSlotsByNormalizedUrl = new Map();
 let visibleTabs = [];
 let rows = [];
 let sortMode = "window";
 let searchQuery = "";
 let selectedIndex = 0;
+let keepOpenAfterSwitch = false;
 let draggedTabId = null;
 let dropTarget = null;
 
@@ -170,6 +177,20 @@ function refreshDuplicateCounts() {
   duplicateCountsByTabId = findDuplicateCountsByTabId(tabs);
 }
 
+function refreshNumericBookmarkSlots() {
+  numericBookmarkSlotsByNormalizedUrl = new Map();
+
+  Object.entries(numericBookmarks).forEach(([slot, bookmark]) => {
+    if (!bookmark?.normalizedUrl) {
+      return;
+    }
+
+    const slots = numericBookmarkSlotsByNormalizedUrl.get(bookmark.normalizedUrl) ?? [];
+    slots.push(slot);
+    numericBookmarkSlotsByNormalizedUrl.set(bookmark.normalizedUrl, slots);
+  });
+}
+
 function setError(message) {
   list.replaceChildren();
   const error = document.createElement("div");
@@ -216,6 +237,73 @@ function getRowIndexForTabId(tabId) {
   return rowIndex >= 0 ? rowIndex : 0;
 }
 
+function getNumericShortcutSlot(event) {
+  const match = event.code.match(/^Digit([1-9])$/);
+  return match ? match[1] : null;
+}
+
+function closeAfterSwitchIfNeeded() {
+  if (!keepOpenAfterSwitch) {
+    window.close();
+  }
+}
+
+function showShortcutNotification(message) {
+  const hostId = "__tabcoach_shortcut_toast";
+  const existingHost = document.getElementById(hostId);
+  if (existingHost) {
+    existingHost.remove();
+  }
+
+  const host = document.createElement("div");
+  host.id = hostId;
+  Object.assign(host.style, {
+    all: "initial",
+    position: "fixed",
+    bottom: "20px",
+    right: "20px",
+    zIndex: "2147483647",
+    pointerEvents: "none",
+    userSelect: "none",
+    WebkitUserSelect: "none"
+  });
+
+  const shadow = host.attachShadow({ mode: "open" });
+  const style = document.createElement("style");
+  style.textContent = `
+    .toast {
+      box-sizing: border-box;
+      max-width: 220px;
+      padding: 8px 11px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.94);
+      color: #fff;
+      font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+      white-space: normal;
+      word-break: break-word;
+      pointer-events: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    .toast::selection {
+      background: transparent;
+    }
+  `;
+
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.textContent = message;
+  shadow.append(style, toast);
+  document.documentElement.appendChild(host);
+
+  setTimeout(() => {
+    host.remove();
+  }, 1100);
+}
+
 async function switchToSelectedTab() {
   const tabId = getSelectedTabId();
   if (tabId === null) {
@@ -223,12 +311,44 @@ async function switchToSelectedTab() {
   }
 
   await sendMessage({ type: SWITCH_TAB_MESSAGE, tabId }).then((response) => assertResponse(response, "Tab switch failed"));
-  window.close();
+  closeAfterSwitchIfNeeded();
 }
 
 async function createNewTab() {
   await sendMessage({ type: CREATE_TAB_MESSAGE }).then((response) => assertResponse(response, "New tab failed"));
-  window.close();
+  closeAfterSwitchIfNeeded();
+}
+
+async function assignNumericBookmark(slot) {
+  const tabId = getSelectedTabId();
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab?.url) {
+    return;
+  }
+
+  numericBookmarks = {
+    ...numericBookmarks,
+    [slot]: {
+      title: tab.displayTitle || tab.title || tab.url || "Untitled tab",
+      url: tab.url,
+      normalizedUrl: normalizeUrl(tab.url),
+      assignedAt: new Date().toISOString()
+    }
+  };
+  await chrome.storage.sync.set({ [NUMERIC_BOOKMARKS_KEY]: numericBookmarks });
+  refreshNumericBookmarkSlots();
+  renderTabs();
+  selectedIndex = getRowIndexForTabId(tabId);
+  applyRowState();
+  showShortcutNotification(`Bookmark ${slot} saved`);
+}
+
+async function jumpToNumericBookmark(slot) {
+  const bookmark = numericBookmarks[slot];
+  await sendMessage({ type: JUMP_NUMERIC_BOOKMARK_MESSAGE, bookmark }).then((response) =>
+    assertResponse(response, `No numeric bookmark saved in slot ${slot}`)
+  );
+  closeAfterSwitchIfNeeded();
 }
 
 async function closeTab(tabId) {
@@ -494,7 +614,10 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     const tabTitle = document.createElement("div");
     tabTitle.className = "tab-title";
     const tabTitleText = tab.displayTitle || tab.title || tab.url || "Untitled tab";
-    tabTitle.textContent = tabTitleText;
+    const tabTitleLabel = document.createElement("span");
+    tabTitleLabel.className = "tab-title-label";
+    tabTitleLabel.textContent = tabTitleText;
+    tabTitle.appendChild(tabTitleLabel);
 
     const duplicateCount = duplicateCountsByTabId.get(tab.id);
     if (duplicateCount) {
@@ -504,6 +627,15 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
       duplicatePill.title = `${duplicateCount} tabs share this normalized URL`;
       tabTitle.appendChild(duplicatePill);
     }
+
+    const numericSlots = numericBookmarkSlotsByNormalizedUrl.get(normalizeUrl(tab.url)) ?? [];
+    numericSlots.forEach((slot) => {
+      const slotPill = document.createElement("span");
+      slotPill.className = "numeric-bookmark-pill";
+      slotPill.textContent = slot;
+      slotPill.title = `Ctrl+${slot} jumps to this numeric bookmark`;
+      tabTitle.appendChild(slotPill);
+    });
 
     const tabUrl = document.createElement("div");
     tabUrl.className = "tab-url";
@@ -553,6 +685,10 @@ async function loadTabs() {
     const response = await sendMessage({ type: GET_TAB_SWITCHER_ITEMS_MESSAGE }).then((result) =>
       assertResponse(result, "Could not load tabs")
     );
+    const stored = await chrome.storage.sync.get({ [NUMERIC_BOOKMARKS_KEY]: {}, [SWITCHER_OPEN_LEFT_KEY]: false });
+    numericBookmarks = stored[NUMERIC_BOOKMARKS_KEY] || {};
+    keepOpenAfterSwitch = Boolean(stored[SWITCHER_OPEN_LEFT_KEY]);
+    refreshNumericBookmarkSlots();
     tabs = response.tabs;
     refreshDuplicateCounts();
     refreshVisibleTabs();
@@ -618,7 +754,53 @@ list.addEventListener("drop", (event) => {
   void moveDraggedTab().catch(reportActionError);
 });
 
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE || message.windowId !== windowId) {
+    return false;
+  }
+
+  const slot = String(message.slot);
+  if (!/^[1-9]$/.test(slot)) {
+    sendResponse({ ok: false, error: "Invalid numeric bookmark slot" });
+    return true;
+  }
+
+  if (message.action === "assign") {
+    void assignNumericBookmark(slot)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error) => {
+        reportActionError(error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+    return true;
+  }
+
+  if (message.action === "jump") {
+    sendResponse({ ok: true });
+    void jumpToNumericBookmark(slot).catch(reportActionError);
+    return false;
+  }
+
+  sendResponse({ ok: false, error: "Invalid numeric bookmark action" });
+  return true;
+});
+
 document.addEventListener("keydown", (event) => {
+  const numericSlot = getNumericShortcutSlot(event);
+  if (event.ctrlKey && !event.metaKey && !event.altKey && numericSlot) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.shiftKey) {
+      void assignNumericBookmark(numericSlot).catch(reportActionError);
+      return;
+    }
+
+    void jumpToNumericBookmark(numericSlot).catch(reportActionError);
+    return;
+  }
+
   if (event.key === "Escape") {
     event.preventDefault();
     if (searchInput.value) {
@@ -648,6 +830,6 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     void switchToSelectedTab().catch(reportActionError);
   }
-});
+}, { capture: true });
 
 void loadTabs();

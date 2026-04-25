@@ -25,6 +25,44 @@
         "mac": "Command+Shift+S"
       },
       "description": "Send selected text to Tabcoach TTS"
+    },
+    "assign-numeric-bookmark-1": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+1",
+        "mac": "MacCtrl+Shift+1"
+      },
+      "description": "Assign numeric bookmark 1 to the active tab"
+    },
+    "jump-numeric-bookmark-1": {
+      "suggested_key": {
+        "default": "Ctrl+1",
+        "mac": "MacCtrl+1"
+      },
+      "description": "Jump to numeric bookmark 1"
+    },
+    "assign-numeric-bookmark-2": {
+      "description": "Assign numeric bookmark 2 to the active tab"
+    },
+    "jump-numeric-bookmark-2": {
+      "description": "Jump to numeric bookmark 2"
+    },
+    "assign-numeric-bookmark-3": {
+      "description": "Assign numeric bookmark 3 to the active tab"
+    },
+    "jump-numeric-bookmark-3": {
+      "description": "Jump to numeric bookmark 3"
+    },
+    "assign-numeric-bookmark-4": {
+      "description": "Assign numeric bookmark 4 to the active tab"
+    },
+    "jump-numeric-bookmark-4": {
+      "description": "Jump to numeric bookmark 4"
+    },
+    "assign-numeric-bookmark-5": {
+      "description": "Assign numeric bookmark 5 to the active tab"
+    },
+    "jump-numeric-bookmark-5": {
+      "description": "Jump to numeric bookmark 5"
     }
   },
   "action": {

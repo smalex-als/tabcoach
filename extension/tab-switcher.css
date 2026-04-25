@@ -192,7 +192,6 @@ button {
   min-width: 0;
 }
 
-.tab-title,
 .tab-url {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -200,7 +199,17 @@ button {
 }
 
 .tab-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
   font-weight: 500;
+}
+
+.tab-title-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .row[data-active="true"] .tab-title {
@@ -216,6 +225,7 @@ button {
 .duplicate-pill {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   height: 18px;
   margin-left: 8px;
   border: 1px solid rgba(250, 204, 21, 0.42);
@@ -223,6 +233,24 @@ button {
   background: rgba(250, 204, 21, 0.12);
   color: #fde68a;
   padding: 0 7px;
+  font-size: 12px;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
+.numeric-bookmark-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 8px;
+  border: 1px solid rgba(96, 165, 250, 0.48);
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.14);
+  color: #bfdbfe;
+  padding: 0 6px;
   font-size: 12px;
   font-weight: 700;
   vertical-align: 1px;

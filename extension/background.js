@@ -4,6 +4,7 @@ const DEFAULT_SETTINGS = {
   docsGrouping: true,
   fetchDiagnostics: true,
   syncIntervalMinutes: 1,
+  switcherOpenLeft: false,
   badgeMode: "both"
 };
 const SYNC_ENDPOINT = "/api/sync";
@@ -12,16 +13,23 @@ const TAB_SWITCH_LOG_ENDPOINT = "/api/tab-switch";
 const TAB_EVENT_LOG_ENDPOINT = "/api/tab-event";
 const SYNC_ALARM = "tabcoach-sync";
 const SYNC_DEBOUNCE_MS = 1500;
+const DEFAULT_SWITCHER_POPUP_WIDTH = 940;
+const DEFAULT_SWITCHER_POPUP_HEIGHT = 720;
+const LEFT_SWITCHER_POPUP_WIDTH = 800;
 const NEW_TAB_DUPLICATE_GRACE_MS = 3 * 60 * 1000;
 const DOCS_GROUP_TITLE = "Docs";
 const DOCS_GROUP_COLOR = "blue";
 const TRANSIENT_RETRY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_DELAY_MS = 500;
 const TTS_SUCCESS_BADGE_MS = 3000;
+const NUMERIC_BOOKMARK_BADGE_MS = 1500;
 const ACTION_TITLE = "Tabcoach";
 const TAB_SWITCHER_PAGE = "tab-switcher.html";
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
+const JUMP_NUMERIC_BOOKMARK_MESSAGE = "tabcoach:jump-numeric-bookmark";
+const POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE = "tabcoach:popup-numeric-bookmark-command";
+const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
@@ -29,6 +37,8 @@ const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
+const ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX = "assign-numeric-bookmark-";
+const JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX = "jump-numeric-bookmark-";
 
 const TRACKING_PARAMS = new Set([
   "fbclid",
@@ -49,6 +59,7 @@ const TRACKING_PARAMS = new Set([
 let pendingSyncTimer = null;
 let badgeResetTimer = null;
 let tabSwitcherPopupWindowId = null;
+let tabSwitcherSourceWindowId = null;
 let settingsCache = null;
 let lastServerHealth = {
   ok: null,
@@ -75,6 +86,7 @@ function sanitizeSettings(settings) {
     docsGrouping: Boolean(settings.docsGrouping),
     fetchDiagnostics: Boolean(settings.fetchDiagnostics),
     syncIntervalMinutes: Number.isFinite(syncIntervalMinutes) && syncIntervalMinutes >= 1 ? syncIntervalMinutes : DEFAULT_SETTINGS.syncIntervalMinutes,
+    switcherOpenLeft: Boolean(settings.switcherOpenLeft),
     badgeMode: badgeModes.has(settings.badgeMode) ? settings.badgeMode : DEFAULT_SETTINGS.badgeMode
   };
 }
@@ -845,6 +857,28 @@ async function collectTabSwitcherItems(windowId) {
   return addTabDisplayTitles(items);
 }
 
+function getTabSwitcherPopupBounds(sourceWindow, settings) {
+  const sourceHeight = typeof sourceWindow?.height === "number" ? Math.max(420, sourceWindow.height) : DEFAULT_SWITCHER_POPUP_HEIGHT;
+
+  if (
+    settings.switcherOpenLeft &&
+    typeof sourceWindow?.left === "number" &&
+    typeof sourceWindow.top === "number"
+  ) {
+    return {
+      width: LEFT_SWITCHER_POPUP_WIDTH,
+      height: sourceHeight,
+      left: sourceWindow.left - LEFT_SWITCHER_POPUP_WIDTH,
+      top: sourceWindow.top
+    };
+  }
+
+  return {
+    width: DEFAULT_SWITCHER_POPUP_WIDTH,
+    height: sourceHeight
+  };
+}
+
 async function openTabSwitcherPopup() {
   const focusedWindow = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
   const [activeTab] = typeof focusedWindow?.id === "number" ? await chrome.tabs.query({ active: true, windowId: focusedWindow.id }) : [];
@@ -853,7 +887,9 @@ async function openTabSwitcherPopup() {
     throw new Error("No active tab");
   }
 
+  const settings = await getSettings();
   const popupUrl = chrome.runtime.getURL(`${TAB_SWITCHER_PAGE}?windowId=${activeTab.windowId}`);
+  tabSwitcherSourceWindowId = activeTab.windowId;
 
   if (typeof tabSwitcherPopupWindowId === "number") {
     try {
@@ -871,11 +907,61 @@ async function openTabSwitcherPopup() {
   const popupWindow = await chrome.windows.create({
     url: popupUrl,
     type: "popup",
-    width: 940,
-    height: 720,
+    ...getTabSwitcherPopupBounds(focusedWindow, settings),
     focused: true
   });
   tabSwitcherPopupWindowId = typeof popupWindow.id === "number" ? popupWindow.id : null;
+}
+
+function isTabSwitcherUrl(rawUrl) {
+  if (typeof rawUrl !== "string") {
+    return false;
+  }
+
+  try {
+    const parsedUrl = new URL(rawUrl);
+    const switcherUrl = new URL(chrome.runtime.getURL(TAB_SWITCHER_PAGE));
+    return parsedUrl.origin === switcherUrl.origin && parsedUrl.pathname === switcherUrl.pathname;
+  } catch {
+    return false;
+  }
+}
+
+async function closeTabSwitcherPopup(commandTab = null) {
+  const popupWindowIds = new Set();
+
+  if (typeof commandTab?.windowId === "number" && isTabSwitcherUrl(commandTab.url)) {
+    popupWindowIds.add(commandTab.windowId);
+  }
+
+  if (typeof tabSwitcherPopupWindowId === "number") {
+    popupWindowIds.add(tabSwitcherPopupWindowId);
+  }
+
+  const tabs = await chrome.tabs.query({});
+  tabs.forEach((tab) => {
+    if (typeof tab.windowId === "number" && isTabSwitcherUrl(tab.url)) {
+      popupWindowIds.add(tab.windowId);
+    }
+  });
+
+  if (popupWindowIds.size === 0) {
+    return false;
+  }
+
+  await Promise.all(
+    [...popupWindowIds].map(async (windowId) => {
+      try {
+        await chrome.windows.remove(windowId);
+      } catch (error) {
+        console.warn("Tabcoach tab switcher close failed", error);
+      }
+    })
+  );
+
+  tabSwitcherPopupWindowId = null;
+  tabSwitcherSourceWindowId = null;
+  return true;
 }
 
 function getSwitcherContextWindowId(context) {
@@ -906,6 +992,274 @@ async function getActiveTabInWindow(windowId) {
   return activeTab ?? null;
 }
 
+async function getFocusedActiveTab(commandTab = null) {
+  const sourceWindowId = getTabSwitcherSourceWindowId(commandTab);
+  if (typeof sourceWindowId === "number") {
+    tabSwitcherPopupWindowId = typeof commandTab?.windowId === "number" ? commandTab.windowId : tabSwitcherPopupWindowId;
+    tabSwitcherSourceWindowId = sourceWindowId;
+  }
+
+  const popupSourceWindowId =
+    typeof sourceWindowId === "number"
+      ? sourceWindowId
+      : typeof commandTab?.windowId === "number" &&
+          commandTab.windowId === tabSwitcherPopupWindowId &&
+          typeof tabSwitcherSourceWindowId === "number"
+        ? tabSwitcherSourceWindowId
+        : null;
+
+  if (typeof popupSourceWindowId === "number") {
+    const sourceActiveTab = await getActiveTabInWindow(popupSourceWindowId);
+    if (sourceActiveTab) {
+      return sourceActiveTab;
+    }
+  }
+
+  if (typeof commandTab?.id === "number" && typeof commandTab.windowId === "number") {
+    return commandTab;
+  }
+
+  const windowId = await getFocusedWindowId();
+  const activeTab = await getActiveTabInWindow(windowId);
+  if (activeTab) {
+    return activeTab;
+  }
+
+  const [lastFocusedTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return lastFocusedTab ?? null;
+}
+
+function getNumericBookmarkCommandSlot(command, prefix) {
+  if (typeof command !== "string" || !command.startsWith(prefix)) {
+    return null;
+  }
+
+  const slot = Number(command.slice(prefix.length));
+  if (!Number.isInteger(slot) || slot < 1 || slot > 9) {
+    return null;
+  }
+
+  return slot;
+}
+
+function getTabSwitcherSourceWindowId(commandTab = null) {
+  if (typeof commandTab?.url !== "string") {
+    return null;
+  }
+
+  try {
+    const parsedUrl = new URL(commandTab.url);
+    const switcherUrl = new URL(chrome.runtime.getURL(TAB_SWITCHER_PAGE));
+    if (parsedUrl.origin !== switcherUrl.origin || parsedUrl.pathname !== switcherUrl.pathname) {
+      return null;
+    }
+
+    const sourceWindowId = Number(parsedUrl.searchParams.get("windowId"));
+    return Number.isInteger(sourceWindowId) ? sourceWindowId : null;
+  } catch {
+    return null;
+  }
+}
+
+function truncateNotificationText(text, maxLength = 72) {
+  const value = typeof text === "string" ? text.trim() : "";
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+async function showShortcutPageNotification(tabId, message) {
+  if (typeof tabId !== "number") {
+    return;
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (text) => {
+        const hostId = "__tabcoach_shortcut_toast";
+        const existingHost = document.getElementById(hostId);
+        if (existingHost) {
+          existingHost.remove();
+        }
+
+        const host = document.createElement("div");
+        host.id = hostId;
+        Object.assign(host.style, {
+          all: "initial",
+          position: "fixed",
+          bottom: "20px",
+          right: "20px",
+          zIndex: "2147483647",
+          pointerEvents: "none",
+          userSelect: "none",
+          WebkitUserSelect: "none"
+        });
+
+        const shadow = host.attachShadow({ mode: "open" });
+        const style = document.createElement("style");
+        style.textContent = `
+          .toast {
+            box-sizing: border-box;
+            max-width: 220px;
+            padding: 8px 11px;
+            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.94);
+            color: #fff;
+            font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+            white-space: normal;
+            word-break: break-word;
+            pointer-events: none;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+          }
+
+          .toast::selection {
+            background: transparent;
+          }
+        `;
+
+        const toast = document.createElement("div");
+        toast.className = "toast";
+        toast.textContent = text;
+        shadow.append(style, toast);
+        document.documentElement.appendChild(host);
+
+        setTimeout(() => {
+          host.remove();
+        }, 1100);
+      },
+      args: [message]
+    });
+  } catch (error) {
+    console.warn("Tabcoach shortcut notification failed", error);
+  }
+}
+
+async function showNumericBookmarkFeedback(slot, action, tab = null, title = "") {
+  await chrome.action.setBadgeBackgroundColor({ color: action === "assign" ? "#2563eb" : "#7c3aed" });
+  await chrome.action.setBadgeText({ text: String(slot) });
+  await chrome.action.setTitle({
+    title: `${ACTION_TITLE}: numeric bookmark ${slot} ${action === "assign" ? "saved" : "opened"}`
+  });
+  if (action === "assign") {
+    await showShortcutPageNotification(tab?.id, `Bookmark ${slot} saved`);
+  }
+
+  if (badgeResetTimer !== null) {
+    clearTimeout(badgeResetTimer);
+  }
+
+  badgeResetTimer = setTimeout(() => {
+    badgeResetTimer = null;
+    void restoreServerHealthBadge();
+  }, NUMERIC_BOOKMARK_BADGE_MS);
+}
+
+async function showNumericBookmarkCommandError(slot, tab, error) {
+  await showShortcutPageNotification(
+    tab?.id,
+    `Bookmark ${slot} failed - ${truncateNotificationText(getErrorMessage(error), 56)}`
+  );
+}
+
+async function assignNumericBookmarkFromActiveTab(slot, commandTab = null) {
+  const activeTab = await getFocusedActiveTab(commandTab);
+  if (!activeTab?.url || typeof activeTab.url !== "string") {
+    throw new Error("No active tab URL to save as a numeric bookmark");
+  }
+
+  const stored = await chrome.storage.sync.get({ [NUMERIC_BOOKMARKS_KEY]: {} });
+  const numericBookmarks = stored[NUMERIC_BOOKMARKS_KEY] || {};
+  await chrome.storage.sync.set({
+    [NUMERIC_BOOKMARKS_KEY]: {
+      ...numericBookmarks,
+      [slot]: {
+        title: activeTab.title || activeTab.url || "Untitled tab",
+        url: activeTab.url,
+        normalizedUrl: normalizeUrl(activeTab.url),
+        assignedAt: new Date().toISOString()
+      }
+    }
+  });
+
+  await showNumericBookmarkFeedback(slot, "assign", activeTab, activeTab.title || activeTab.url);
+}
+
+async function jumpToNumericBookmarkSlot(slot, commandTab = null) {
+  const activeTab = await getFocusedActiveTab(commandTab);
+  const windowId = typeof activeTab?.windowId === "number" ? activeTab.windowId : await getFocusedWindowId();
+  const stored = await chrome.storage.sync.get({ [NUMERIC_BOOKMARKS_KEY]: {} });
+  const bookmark = stored[NUMERIC_BOOKMARKS_KEY]?.[slot];
+
+  const targetTab = await jumpToNumericBookmark(bookmark, { windowId });
+  await showNumericBookmarkFeedback(slot, "jump", targetTab, bookmark?.title || bookmark?.url);
+}
+
+async function forwardNumericBookmarkCommandToPopup(action, slot, commandTab = null) {
+  const sourceWindowId = getTabSwitcherSourceWindowId(commandTab) ?? tabSwitcherSourceWindowId;
+  if (typeof commandTab?.windowId !== "number" || typeof sourceWindowId !== "number") {
+    return false;
+  }
+
+  if (getTabSwitcherSourceWindowId(commandTab) === null && commandTab.windowId !== tabSwitcherPopupWindowId) {
+    return false;
+  }
+
+  tabSwitcherPopupWindowId = commandTab.windowId;
+  tabSwitcherSourceWindowId = sourceWindowId;
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE,
+      action,
+      slot,
+      windowId: sourceWindowId
+    });
+    return Boolean(response?.ok);
+  } catch (error) {
+    console.warn("Tabcoach popup numeric bookmark command forwarding failed", error);
+    return false;
+  }
+}
+
+async function logCommandShortcuts() {
+  if (!chrome.commands?.getAll) {
+    return;
+  }
+
+  const commands = await chrome.commands.getAll();
+  const numericBookmarkCommands = commands.filter(
+    (command) =>
+      command.name?.startsWith(ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX) ||
+      command.name?.startsWith(JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX)
+  );
+
+  if (numericBookmarkCommands.length === 0) {
+    return;
+  }
+
+  console.info(
+    "Tabcoach numeric bookmark shortcuts",
+    numericBookmarkCommands.map((command) => ({
+      name: command.name,
+      shortcut: command.shortcut || ""
+    }))
+  );
+
+  const unassignedCommands = numericBookmarkCommands.filter((command) => !command.shortcut);
+  if (unassignedCommands.length > 0) {
+    console.warn(
+      "Tabcoach numeric bookmark shortcuts are unassigned; set them in chrome://extensions/shortcuts",
+      unassignedCommands.map((command) => command.name)
+    );
+  }
+}
+
 async function createTabFromSwitcher(context = {}) {
   const windowId = getSwitcherContextWindowId(context);
   if (typeof windowId !== "number") {
@@ -927,6 +1281,45 @@ async function createTabFromSwitcher(context = {}) {
   if (typeof tab.windowId === "number") {
     await chrome.windows.update(tab.windowId, { focused: true });
   }
+}
+
+async function jumpToNumericBookmark(bookmark, context = {}) {
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId !== "number") {
+    throw new Error("Invalid window id");
+  }
+
+  if (!bookmark?.url || typeof bookmark.url !== "string") {
+    throw new Error("No numeric bookmark saved in this slot");
+  }
+
+  const normalizedUrl = typeof bookmark.normalizedUrl === "string" ? bookmark.normalizedUrl : normalizeUrl(bookmark.url);
+  const windowTabs = await chrome.tabs.query({ windowId });
+  const matchingTab = windowTabs.find((tab) => typeof tab.url === "string" && normalizeUrl(tab.url) === normalizedUrl);
+
+  if (typeof matchingTab?.id === "number") {
+    await switchToTab(matchingTab.id, context);
+    return matchingTab;
+  }
+
+  const activeTab = await getActiveTabInWindow(windowId);
+  const tab = await chrome.tabs.create({
+    windowId,
+    index: typeof activeTab?.index === "number" ? activeTab.index : 0,
+    url: bookmark.url,
+    active: true
+  });
+  markTabCreated(tab.id);
+
+  if (typeof activeTab?.groupId === "number" && activeTab.groupId >= 0 && typeof tab.id === "number") {
+    await chrome.tabs.group({ groupId: activeTab.groupId, tabIds: [tab.id] });
+  }
+
+  if (typeof tab.windowId === "number") {
+    await chrome.windows.update(tab.windowId, { focused: true });
+  }
+
+  return tab;
 }
 
 async function switchToTab(tabId, context = {}) {
@@ -1111,11 +1504,17 @@ function scheduleSync(reason) {
 chrome.runtime.onInstalled.addListener(() => {
   void createSyncAlarm();
   void pushSnapshot("installed");
+  void logCommandShortcuts().catch((error) => {
+    console.warn("Tabcoach command shortcut check failed", error);
+  });
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void createSyncAlarm();
   void pushSnapshot("startup");
+  void logCommandShortcuts().catch((error) => {
+    console.warn("Tabcoach command shortcut check failed", error);
+  });
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -1162,6 +1561,7 @@ chrome.tabs.onActivated.addListener(() => {
 chrome.windows.onRemoved.addListener((windowId) => {
   if (windowId === tabSwitcherPopupWindowId) {
     tabSwitcherPopupWindowId = null;
+    tabSwitcherSourceWindowId = null;
   }
 });
 
@@ -1196,6 +1596,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach tab create failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === JUMP_NUMERIC_BOOKMARK_MESSAGE) {
+    void jumpToNumericBookmark(message.bookmark, switcherContext)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error) => {
+        console.error("Tabcoach numeric bookmark jump failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 
@@ -1283,9 +1696,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-chrome.commands.onCommand.addListener((command) => {
+chrome.commands.onCommand.addListener((command, tab) => {
   if (command === "show-tab-switcher") {
-    void openTabSwitcherPopup().catch((error) => {
+    void (async () => {
+      if (await closeTabSwitcherPopup(tab)) {
+        return;
+      }
+
+      await openTabSwitcherPopup();
+    })().catch((error) => {
       console.error("Tabcoach tab switcher failed", error);
     });
     return;
@@ -1294,6 +1713,36 @@ chrome.commands.onCommand.addListener((command) => {
   if (command === "speak-selection") {
     void sendSelectionToTts().catch((error) => {
       console.error("Tabcoach TTS selection failed", error);
+    });
+    return;
+  }
+
+  const assignNumericBookmarkSlot = getNumericBookmarkCommandSlot(command, ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX);
+  if (assignNumericBookmarkSlot !== null) {
+    void (async () => {
+      if (await forwardNumericBookmarkCommandToPopup("assign", assignNumericBookmarkSlot, tab)) {
+        return;
+      }
+
+      await assignNumericBookmarkFromActiveTab(assignNumericBookmarkSlot, tab);
+    })().catch((error) => {
+      console.error("Tabcoach numeric bookmark assign failed", error);
+      void showNumericBookmarkCommandError(assignNumericBookmarkSlot, tab, error);
+    });
+    return;
+  }
+
+  const jumpNumericBookmarkSlot = getNumericBookmarkCommandSlot(command, JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX);
+  if (jumpNumericBookmarkSlot !== null) {
+    void (async () => {
+      if (await forwardNumericBookmarkCommandToPopup("jump", jumpNumericBookmarkSlot, tab)) {
+        return;
+      }
+
+      await jumpToNumericBookmarkSlot(jumpNumericBookmarkSlot, tab);
+    })().catch((error) => {
+      console.error("Tabcoach numeric bookmark jump failed", error);
+      void showNumericBookmarkCommandError(jumpNumericBookmarkSlot, tab, error);
     });
   }
 });

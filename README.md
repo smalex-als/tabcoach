@@ -82,11 +82,13 @@ The extension will:
 - group Google Docs, Sheets, and Slides tabs into a blue `Docs` tab group
 - show server health and duplicate-group count as extension badge text
 - show, create, drag-reorder, bookmark, copy URLs, close, and switch between tabs in the current window with `Command+E` on macOS, including inline duplicate indicators, tab group labels, search, and recently visited sorting
+- assign numeric tab bookmark 1 from any page with `Ctrl+Shift+1` (`Control+Shift+1` on macOS), then jump with `Ctrl+1`; slots 2 through 5 are also available as extension commands and can be assigned in `chrome://extensions/shortcuts`; saved numeric bookmarks show a small in-page notification; the `Command+E` popup supports slots 1 through 9
 - store bookmarks under `Tabcoach/<tab group name>` to keep saved tabs organized
 - send selected page text to the local TTS flow with `Command+Shift+S` on macOS
 - show a badge and notification when TTS is started successfully
 
 Extension settings are available from `chrome://extensions` -> `Tabcoach` -> `Details` -> `Extension options`.
+Settings include an option to open the `Command+E` tab switcher as a left-side window next to the current Chrome window. In left-side mode, selecting a tab keeps the switcher open while focus moves to the selected tab.
 
 The `Command+E` popup includes a `+` button that opens a new tab before the currently active tab in the source window. If the active tab is in a Chrome tab group, the new tab is added to the same group.
 
