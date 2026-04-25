@@ -1,4 +1,5 @@
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
+const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
@@ -38,6 +39,7 @@ const windowId = Number(params.get("windowId"));
 const title = document.getElementById("title");
 const list = document.getElementById("list");
 const searchInput = document.getElementById("searchInput");
+const newTabButton = document.getElementById("newTabButton");
 const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
 
@@ -209,6 +211,11 @@ function getSelectedTabId() {
   return Number.isFinite(tabId) ? tabId : null;
 }
 
+function getRowIndexForTabId(tabId) {
+  const rowIndex = rows.findIndex((row) => Number(row.dataset.tabcoachTabId) === tabId);
+  return rowIndex >= 0 ? rowIndex : 0;
+}
+
 async function switchToSelectedTab() {
   const tabId = getSelectedTabId();
   if (tabId === null) {
@@ -216,6 +223,11 @@ async function switchToSelectedTab() {
   }
 
   await sendMessage({ type: SWITCH_TAB_MESSAGE, tabId }).then((response) => assertResponse(response, "Tab switch failed"));
+  window.close();
+}
+
+async function createNewTab() {
+  await sendMessage({ type: CREATE_TAB_MESSAGE }).then((response) => assertResponse(response, "New tab failed"));
   window.close();
 }
 
@@ -232,8 +244,9 @@ async function closeTab(tabId) {
     return;
   }
 
-  selectedIndex = Math.min(closedIndex >= 0 ? closedIndex : selectedIndex, visibleTabs.length - 1);
   renderTabs();
+  selectedIndex = Math.min(closedIndex >= 0 ? closedIndex : selectedIndex, rows.length - 1);
+  applyRowState();
 }
 
 async function toggleBookmark(tabId) {
@@ -333,11 +346,9 @@ async function moveDraggedTab() {
     tabs = response.tabs;
     refreshDuplicateCounts();
     refreshVisibleTabs();
-    selectedIndex = Math.max(
-      0,
-      visibleTabs.findIndex((tab) => tab.id === selectedTabId || tab.id === draggedTabId)
-    );
     renderTabs();
+    selectedIndex = getRowIndexForTabId(selectedTabId) || getRowIndexForTabId(draggedTabId);
+    applyRowState();
   } finally {
     draggedTabId = null;
   }
@@ -377,6 +388,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     empty.className = "empty";
     empty.textContent = tabs.length === 0 ? "No tabs" : "No matching tabs";
     list.appendChild(empty);
+    applyRowState(scrollBlock);
     return;
   }
 
@@ -416,12 +428,13 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     row.dataset.active = String(Boolean(tab.active));
     row.title = sortMode === "window" ? "Drag to reorder tabs" : "";
 
+    const rowIndex = rows.length;
     row.addEventListener("mouseenter", () => {
-      selectedIndex = index;
+      selectedIndex = rowIndex;
       applyRowState();
     });
     row.addEventListener("click", () => {
-      selectedIndex = index;
+      selectedIndex = rowIndex;
       void switchToSelectedTab().catch(reportActionError);
     });
     row.addEventListener("dragstart", (event) => {
@@ -543,11 +556,9 @@ async function loadTabs() {
     tabs = response.tabs;
     refreshDuplicateCounts();
     refreshVisibleTabs();
-    selectedIndex = Math.max(
-      0,
-      visibleTabs.findIndex((tab) => tab.active)
-    );
     renderTabs({ scrollBlock: "center" });
+    selectedIndex = getRowIndexForTabId(visibleTabs.find((tab) => tab.active)?.id);
+    applyRowState("center");
     searchInput.focus();
   } catch (error) {
     setError(error instanceof Error ? error.message : String(error));
@@ -558,15 +569,17 @@ closeButton.addEventListener("click", () => {
   window.close();
 });
 
+newTabButton.addEventListener("click", () => {
+  void createNewTab().catch(reportActionError);
+});
+
 searchInput.addEventListener("input", () => {
   const selectedTabId = getSelectedTabId();
   searchQuery = searchInput.value;
   refreshVisibleTabs();
-  selectedIndex = Math.max(
-    0,
-    visibleTabs.findIndex((tab) => tab.id === selectedTabId)
-  );
   renderTabs({ scrollBlock: "center" });
+  selectedIndex = getRowIndexForTabId(selectedTabId);
+  applyRowState("center");
 });
 
 sortButtons.forEach((button) => {
@@ -574,11 +587,9 @@ sortButtons.forEach((button) => {
     const selectedTabId = getSelectedTabId();
     sortMode = button.dataset.sortMode || "window";
     refreshVisibleTabs();
-    selectedIndex = Math.max(
-      0,
-      visibleTabs.findIndex((tab) => tab.id === selectedTabId)
-    );
     renderTabs();
+    selectedIndex = getRowIndexForTabId(selectedTabId);
+    applyRowState();
     if (sortMode === "recent") {
       list.scrollTop = 0;
     }

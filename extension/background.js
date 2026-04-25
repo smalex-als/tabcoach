@@ -21,6 +21,7 @@ const TTS_SUCCESS_BADGE_MS = 3000;
 const ACTION_TITLE = "Tabcoach";
 const TAB_SWITCHER_PAGE = "tab-switcher.html";
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
+const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
@@ -844,17 +845,6 @@ async function collectTabSwitcherItems(windowId) {
   return addTabDisplayTitles(items);
 }
 
-async function collectTabSwitcherPayload(windowId) {
-  const tabs = await collectTabSwitcherItems(windowId);
-  const duplicateGroups = findDuplicateGroups(tabs).map((group) => ({
-    normalizedUrl: group.normalizedUrl,
-    count: group.tabs.length,
-    tabs: group.tabs
-  }));
-
-  return { tabs, duplicateGroups };
-}
-
 async function openTabSwitcherPopup() {
   const focusedWindow = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
   const [activeTab] = typeof focusedWindow?.id === "number" ? await chrome.tabs.query({ active: true, windowId: focusedWindow.id }) : [];
@@ -914,6 +904,29 @@ async function getActiveTabInWindow(windowId) {
 
   const [activeTab] = await chrome.tabs.query({ active: true, windowId });
   return activeTab ?? null;
+}
+
+async function createTabFromSwitcher(context = {}) {
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId !== "number") {
+    throw new Error("Invalid window id");
+  }
+
+  const activeTab = await getActiveTabInWindow(windowId);
+  const tab = await chrome.tabs.create({
+    windowId,
+    index: typeof activeTab?.index === "number" ? activeTab.index : 0,
+    active: true
+  });
+  markTabCreated(tab.id);
+
+  if (typeof activeTab?.groupId === "number" && activeTab.groupId >= 0 && typeof tab.id === "number") {
+    await chrome.tabs.group({ groupId: activeTab.groupId, tabIds: [tab.id] });
+  }
+
+  if (typeof tab.windowId === "number") {
+    await chrome.windows.update(tab.windowId, { focused: true });
+  }
 }
 
 async function switchToTab(tabId, context = {}) {
@@ -1164,12 +1177,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
 
-    void collectTabSwitcherPayload(message.windowId)
-      .then((payload) => {
-        sendResponse({ ok: true, ...payload });
+    void collectTabSwitcherItems(message.windowId)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
       })
       .catch((error) => {
         console.error("Tabcoach tab switcher item collection failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === CREATE_TAB_MESSAGE) {
+    void createTabFromSwitcher(switcherContext)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error) => {
+        console.error("Tabcoach tab create failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

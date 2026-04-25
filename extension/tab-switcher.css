@@ -82,6 +82,7 @@ button {
 }
 
 .sort-button,
+.new-tab-button,
 .close-button,
 .icon-button {
   border: 1px solid rgba(148, 163, 184, 0.42);
@@ -96,6 +97,16 @@ button {
   height: 34px;
   padding: 0 10px;
   font-size: 15px;
+}
+
+.new-tab-button {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 0;
+  color: #c7d2fe;
+  font-size: 24px;
+  line-height: 1;
 }
 
 .sort-button[aria-pressed="true"] {
