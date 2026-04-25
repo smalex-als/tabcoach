@@ -22,6 +22,7 @@ const params = new URLSearchParams(window.location.search);
 const windowId = Number(params.get("windowId"));
 const title = document.getElementById("title");
 const list = document.getElementById("list");
+const searchInput = document.getElementById("searchInput");
 const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
 
@@ -29,6 +30,7 @@ let tabs = [];
 let visibleTabs = [];
 let rows = [];
 let sortMode = "window";
+let searchQuery = "";
 let selectedIndex = 0;
 let draggedTabId = null;
 let dropTarget = null;
@@ -54,8 +56,24 @@ function formatUrl(rawUrl) {
   }
 }
 
-function sortTabs() {
-  visibleTabs = [...tabs];
+function getTabSearchText(tab) {
+  return [
+    tab.displayTitle,
+    tab.title,
+    tab.url,
+    tab.group?.title,
+    tab.active ? "active" : "",
+    tab.pinned ? "pinned" : "",
+    tab.bookmarked ? "bookmarked" : ""
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function refreshVisibleTabs() {
+  const query = searchQuery.trim().toLowerCase();
+  visibleTabs = query ? tabs.filter((tab) => getTabSearchText(tab).includes(query)) : [...tabs];
 
   if (sortMode === "recent") {
     visibleTabs.sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0));
@@ -118,9 +136,9 @@ async function closeTab(tabId) {
   await sendMessage({ type: CLOSE_TAB_MESSAGE, tabId }).then((response) => assertResponse(response, "Tab close failed"));
 
   tabs = tabs.filter((tab) => tab.id !== tabId);
-  sortTabs();
+  refreshVisibleTabs();
 
-  if (visibleTabs.length === 0) {
+  if (tabs.length === 0) {
     window.close();
     return;
   }
@@ -145,7 +163,7 @@ async function toggleBookmark(tabId) {
   }).then((result) => assertResponse(result, "Bookmark toggle failed"));
 
   tabs = tabs.map((item) => (item.id === tabId ? { ...item, bookmarked: response.bookmarked } : item));
-  sortTabs();
+  refreshVisibleTabs();
   renderTabs();
   list.scrollTop = previousScrollTop;
 }
@@ -223,7 +241,7 @@ async function moveDraggedTab() {
     }).then((result) => assertResponse(result, "Tab move failed"));
 
     tabs = response.tabs;
-    sortTabs();
+    refreshVisibleTabs();
     selectedIndex = Math.max(
       0,
       visibleTabs.findIndex((tab) => tab.id === selectedTabId || tab.id === draggedTabId)
@@ -259,12 +277,14 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
   rows = [];
   list.replaceChildren();
   updateSortButtons();
-  title.textContent = `Tabs in this window (${visibleTabs.length})`;
+  title.textContent = searchQuery.trim()
+    ? `Tabs (${visibleTabs.length}/${tabs.length})`
+    : `Tabs in this window (${tabs.length})`;
 
   if (visibleTabs.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "No tabs";
+    empty.textContent = tabs.length === 0 ? "No tabs" : "No matching tabs";
     list.appendChild(empty);
     return;
   }
@@ -420,12 +440,13 @@ async function loadTabs() {
       assertResponse(result, "Could not load tabs")
     );
     tabs = response.tabs;
-    sortTabs();
+    refreshVisibleTabs();
     selectedIndex = Math.max(
       0,
       visibleTabs.findIndex((tab) => tab.active)
     );
     renderTabs({ scrollBlock: "center" });
+    searchInput.focus();
   } catch (error) {
     setError(error instanceof Error ? error.message : String(error));
   }
@@ -435,12 +456,23 @@ closeButton.addEventListener("click", () => {
   window.close();
 });
 
+searchInput.addEventListener("input", () => {
+  const selectedTabId = getSelectedTabId();
+  searchQuery = searchInput.value;
+  refreshVisibleTabs();
+  selectedIndex = Math.max(
+    0,
+    visibleTabs.findIndex((tab) => tab.id === selectedTabId)
+  );
+  renderTabs({ scrollBlock: "center" });
+});
+
 sortButtons.forEach((button) => {
   button.addEventListener("click", () => {
     const selectedTabId = getSelectedTabId();
     const previousScrollTop = list.scrollTop;
     sortMode = button.dataset.sortMode || "window";
-    sortTabs();
+    refreshVisibleTabs();
     selectedIndex = Math.max(
       0,
       visibleTabs.findIndex((tab) => tab.id === selectedTabId)
@@ -475,6 +507,13 @@ list.addEventListener("drop", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     event.preventDefault();
+    if (searchInput.value) {
+      searchInput.value = "";
+      searchInput.dispatchEvent(new Event("input"));
+      searchInput.focus();
+      return;
+    }
+
     window.close();
     return;
   }
