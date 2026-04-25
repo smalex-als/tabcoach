@@ -43,7 +43,6 @@ const TRACKING_PARAMS = new Set([
 
 const params = new URLSearchParams(window.location.search);
 const windowId = Number(params.get("windowId"));
-const title = document.getElementById("title");
 const list = document.getElementById("list");
 const searchInput = document.getElementById("searchInput");
 const newTabButton = document.getElementById("newTabButton");
@@ -569,9 +568,6 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
   rows = [];
   list.replaceChildren();
   updateSortButtons();
-  title.textContent = searchQuery.trim()
-    ? `Tabs (${visibleTabs.length}/${tabs.length})`
-    : `Tabs in this window (${tabs.length})`;
 
   if (visibleTabs.length === 0) {
     const empty = document.createElement("div");
@@ -792,6 +788,19 @@ closeButton.addEventListener("click", () => {
 
 newTabButton.addEventListener("click", () => {
   void createNewTab().catch(reportActionError);
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "sync" || !changes[NUMERIC_BOOKMARKS_KEY]) {
+    return;
+  }
+
+  const selectedTabId = getSelectedTabId();
+  numericBookmarks = changes[NUMERIC_BOOKMARKS_KEY].newValue || {};
+  refreshNumericBookmarkSlots();
+  renderTabs();
+  selectedIndex = getRowIndexForTabId(selectedTabId);
+  applyRowState();
 });
 
 window.addEventListener("focus", () => {
