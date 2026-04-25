@@ -17,6 +17,21 @@ const groupColors = {
   cyan: "#22d3ee",
   orange: "#fb923c"
 };
+const TRACKING_PARAMS = new Set([
+  "fbclid",
+  "gclid",
+  "mc_cid",
+  "mc_eid",
+  "ref",
+  "si",
+  "spm",
+  "utm_campaign",
+  "utm_content",
+  "utm_id",
+  "utm_medium",
+  "utm_source",
+  "utm_term"
+]);
 
 const params = new URLSearchParams(window.location.search);
 const windowId = Number(params.get("windowId"));
@@ -27,6 +42,7 @@ const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
 
 let tabs = [];
+let duplicateCountsByTabId = new Map();
 let visibleTabs = [];
 let rows = [];
 let sortMode = "window";
@@ -56,6 +72,46 @@ function formatUrl(rawUrl) {
   }
 }
 
+function normalizeUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+
+    parsed.hash = "";
+    parsed.hostname = parsed.hostname.toLowerCase();
+
+    if ((parsed.protocol === "https:" && parsed.port === "443") || (parsed.protocol === "http:" && parsed.port === "80")) {
+      parsed.port = "";
+    }
+
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (TRACKING_PARAMS.has(key.toLowerCase())) {
+        parsed.searchParams.delete(key);
+      }
+    }
+
+    const sortedEntries = [...parsed.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) => {
+      if (leftKey === rightKey) {
+        return leftValue.localeCompare(rightValue);
+      }
+
+      return leftKey.localeCompare(rightKey);
+    });
+
+    parsed.search = "";
+    for (const [key, value] of sortedEntries) {
+      parsed.searchParams.append(key, value);
+    }
+
+    if (parsed.pathname.length > 1 && parsed.pathname.endsWith("/")) {
+      parsed.pathname = parsed.pathname.slice(0, -1);
+    }
+
+    return parsed.toString();
+  } catch {
+    return rawUrl.trim();
+  }
+}
+
 function getTabSearchText(tab) {
   return [
     tab.displayTitle,
@@ -78,6 +134,38 @@ function refreshVisibleTabs() {
   if (sortMode === "recent") {
     visibleTabs.sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0));
   }
+}
+
+function findDuplicateCountsByTabId(tabItems) {
+  const grouped = new Map();
+
+  for (const tab of tabItems) {
+    if (!tab.url || tab.url.startsWith("chrome://")) {
+      continue;
+    }
+
+    const normalizedUrl = normalizeUrl(tab.url);
+    const entries = grouped.get(normalizedUrl) ?? [];
+    entries.push(tab);
+    grouped.set(normalizedUrl, entries);
+  }
+
+  const counts = new Map();
+  for (const groupTabs of grouped.values()) {
+    if (groupTabs.length <= 1) {
+      continue;
+    }
+
+    groupTabs.forEach((tab) => {
+      counts.set(tab.id, groupTabs.length);
+    });
+  }
+
+  return counts;
+}
+
+function refreshDuplicateCounts() {
+  duplicateCountsByTabId = findDuplicateCountsByTabId(tabs);
 }
 
 function setError(message) {
@@ -136,6 +224,7 @@ async function closeTab(tabId) {
   await sendMessage({ type: CLOSE_TAB_MESSAGE, tabId }).then((response) => assertResponse(response, "Tab close failed"));
 
   tabs = tabs.filter((tab) => tab.id !== tabId);
+  refreshDuplicateCounts();
   refreshVisibleTabs();
 
   if (tabs.length === 0) {
@@ -163,6 +252,7 @@ async function toggleBookmark(tabId) {
   }).then((result) => assertResponse(result, "Bookmark toggle failed"));
 
   tabs = tabs.map((item) => (item.id === tabId ? { ...item, bookmarked: response.bookmarked } : item));
+  refreshDuplicateCounts();
   refreshVisibleTabs();
   renderTabs();
   list.scrollTop = previousScrollTop;
@@ -241,6 +331,7 @@ async function moveDraggedTab() {
     }).then((result) => assertResponse(result, "Tab move failed"));
 
     tabs = response.tabs;
+    refreshDuplicateCounts();
     refreshVisibleTabs();
     selectedIndex = Math.max(
       0,
@@ -389,7 +480,17 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
 
     const tabTitle = document.createElement("div");
     tabTitle.className = "tab-title";
-    tabTitle.textContent = tab.displayTitle || tab.title || tab.url || "Untitled tab";
+    const tabTitleText = tab.displayTitle || tab.title || tab.url || "Untitled tab";
+    tabTitle.textContent = tabTitleText;
+
+    const duplicateCount = duplicateCountsByTabId.get(tab.id);
+    if (duplicateCount) {
+      const duplicatePill = document.createElement("span");
+      duplicatePill.className = "duplicate-pill";
+      duplicatePill.textContent = `x${duplicateCount}`;
+      duplicatePill.title = `${duplicateCount} tabs share this normalized URL`;
+      tabTitle.appendChild(duplicatePill);
+    }
 
     const tabUrl = document.createElement("div");
     tabUrl.className = "tab-url";
@@ -440,6 +541,7 @@ async function loadTabs() {
       assertResponse(result, "Could not load tabs")
     );
     tabs = response.tabs;
+    refreshDuplicateCounts();
     refreshVisibleTabs();
     selectedIndex = Math.max(
       0,

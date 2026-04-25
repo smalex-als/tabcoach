@@ -202,6 +202,21 @@ button {
   font-size: 14px;
 }
 
+.duplicate-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  margin-left: 8px;
+  border: 1px solid rgba(250, 204, 21, 0.42);
+  border-radius: 999px;
+  background: rgba(250, 204, 21, 0.12);
+  color: #fde68a;
+  padding: 0 7px;
+  font-size: 12px;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
 .status {
   min-width: 58px;
   color: #c7d2fe;

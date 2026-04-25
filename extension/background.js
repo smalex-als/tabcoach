@@ -844,6 +844,17 @@ async function collectTabSwitcherItems(windowId) {
   return addTabDisplayTitles(items);
 }
 
+async function collectTabSwitcherPayload(windowId) {
+  const tabs = await collectTabSwitcherItems(windowId);
+  const duplicateGroups = findDuplicateGroups(tabs).map((group) => ({
+    normalizedUrl: group.normalizedUrl,
+    count: group.tabs.length,
+    tabs: group.tabs
+  }));
+
+  return { tabs, duplicateGroups };
+}
+
 async function openTabSwitcherPopup() {
   const focusedWindow = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
   const [activeTab] = typeof focusedWindow?.id === "number" ? await chrome.tabs.query({ active: true, windowId: focusedWindow.id }) : [];
@@ -1153,9 +1164,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
 
-    void collectTabSwitcherItems(message.windowId)
-      .then((tabs) => {
-        sendResponse({ ok: true, tabs });
+    void collectTabSwitcherPayload(message.windowId)
+      .then((payload) => {
+        sendResponse({ ok: true, ...payload });
       })
       .catch((error) => {
         console.error("Tabcoach tab switcher item collection failed", error);
