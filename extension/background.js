@@ -2,6 +2,7 @@ const SERVER_URL = "http://127.0.0.1:3847/api/sync";
 const TTS_SELECTION_URL = "http://127.0.0.1:3847/api/tts-selection";
 const TAB_SWITCH_LOG_URL = "http://127.0.0.1:3847/api/tab-switch";
 const TAB_EVENT_LOG_URL = "http://127.0.0.1:3847/api/tab-event";
+const LOCAL_SERVER_PERMISSION_PATTERN = "http://127.0.0.1:3847/*";
 const SYNC_ALARM = "tabcoach-sync";
 const SYNC_DEBOUNCE_MS = 1500;
 const AUTO_CLOSE_DUPLICATES = true;
@@ -42,6 +43,57 @@ const recentTabCreations = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function hasLocalServerHostPermission() {
+  try {
+    if (!chrome.permissions?.contains) {
+      return null;
+    }
+
+    return await chrome.permissions.contains({ origins: [LOCAL_SERVER_PERMISSION_PATTERN] });
+  } catch (error) {
+    console.warn("Tabcoach local fetch permission check failed", error);
+    return null;
+  }
+}
+
+async function fetchLocalServer(label, url, options = {}) {
+  const method = options.method ?? "GET";
+  const hasHostPermission = await hasLocalServerHostPermission();
+
+  console.info("Tabcoach local fetch start", {
+    label,
+    method,
+    url,
+    hasHostPermission
+  });
+
+  try {
+    const response = await fetch(url, options);
+    console.info("Tabcoach local fetch response", {
+      label,
+      method,
+      url,
+      hasHostPermission,
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText
+    });
+    return response;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn("Tabcoach local fetch failed", {
+      label,
+      method,
+      url,
+      hasHostPermission,
+      likelyAccessDenied: hasHostPermission === false || message.includes("Failed to fetch"),
+      errorName: error instanceof Error ? error.name : typeof error,
+      errorMessage: message
+    });
+    throw error;
+  }
 }
 
 function isTransientChromeEditError(error) {
@@ -294,7 +346,7 @@ async function pushSnapshot(reason) {
     await closeDuplicateTabs(tabs);
     await ensureDocsGroup(protectedWindowId);
     const refreshedTabs = await collectTabs();
-    const response = await fetch(SERVER_URL, {
+    const response = await fetchLocalServer("sync", SERVER_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -473,7 +525,7 @@ async function sendSelectionToTts() {
     throw new Error("No selected text found");
   }
 
-  const response = await fetch(TTS_SELECTION_URL, {
+  const response = await fetchLocalServer("tts-selection", TTS_SELECTION_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -707,7 +759,7 @@ async function showTabSwitcherModal() {
         document.removeEventListener("keydown", handleKeydown, true);
       };
 
-      const applyRowState = () => {
+      const applyRowState = (scrollBlock = "nearest") => {
         rows.forEach((row, index) => {
           const isSelected = index === selectedIndex;
           const isActive = row.dataset.tabcoachActive === "true";
@@ -724,7 +776,7 @@ async function showTabSwitcherModal() {
               : "1px solid transparent";
         });
 
-        rows[selectedIndex]?.scrollIntoView({ block: "nearest" });
+        rows[selectedIndex]?.scrollIntoView({ block: scrollBlock });
       };
 
       const selectRelative = (offset) => {
@@ -1031,7 +1083,7 @@ async function showTabSwitcherModal() {
         }
       };
 
-      const renderTabs = () => {
+      const renderTabs = ({ scrollBlock = "nearest" } = {}) => {
         rows.length = 0;
         list.replaceChildren();
         updateSortButtons();
@@ -1337,7 +1389,7 @@ async function showTabSwitcherModal() {
           list.appendChild(row);
         });
 
-        applyRowState();
+        applyRowState(scrollBlock);
       };
 
       header.append(title, sortControls, closeButton);
@@ -1371,7 +1423,7 @@ async function showTabSwitcherModal() {
       document.addEventListener("keydown", handleKeydown, true);
       document.documentElement.appendChild(overlay);
       sortTabs();
-      renderTabs();
+      renderTabs({ scrollBlock: "center" });
       panel.focus();
     },
     args: [
@@ -1403,7 +1455,7 @@ async function switchToTab(tabId, senderTab) {
 
   await chrome.tabs.update(tabId, { active: true });
 
-  void fetch(TAB_SWITCH_LOG_URL, {
+  void fetchLocalServer("tab-switch-log", TAB_SWITCH_LOG_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -1544,7 +1596,7 @@ async function copyTabUrlFromSwitcher(tabId, url, senderTab) {
 }
 
 async function logTabEventFromSwitcher(payload) {
-  const response = await fetch(TAB_EVENT_LOG_URL, {
+  const response = await fetchLocalServer("tab-event-log", TAB_EVENT_LOG_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
