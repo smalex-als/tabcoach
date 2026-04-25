@@ -1574,6 +1574,18 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   void pushSnapshot("settings-changed");
 });
 
+chrome.action.onClicked.addListener((tab) => {
+  void (async () => {
+    if (await focusTabSwitcherPopup(tab)) {
+      return;
+    }
+
+    await openTabSwitcherPopup();
+  })().catch((error) => {
+    console.error("Tabcoach tab switcher action click failed", error);
+  });
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === SYNC_ALARM) {
     void pushSnapshot("alarm");

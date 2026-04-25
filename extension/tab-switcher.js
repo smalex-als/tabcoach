@@ -64,6 +64,7 @@ let keepOpenAfterSwitch = false;
 let draggedTabId = null;
 let dropTarget = null;
 let refreshTimer = null;
+let suppressNextRowClick = false;
 
 function sendMessage(message) {
   return chrome.runtime.sendMessage({ windowId, ...message });
@@ -615,7 +616,21 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     row.title = sortMode === "window" ? "Drag to reorder tabs" : "";
 
     const rowIndex = rows.length;
-    row.addEventListener("click", () => {
+    row.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || (event.target instanceof HTMLElement && event.target.closest("button"))) {
+        return;
+      }
+
+      selectedIndex = rowIndex;
+      suppressNextRowClick = true;
+      void switchToSelectedTab().catch(reportActionError);
+    });
+    row.addEventListener("click", (event) => {
+      if (suppressNextRowClick) {
+        suppressNextRowClick = false;
+        return;
+      }
+
       selectedIndex = rowIndex;
       void switchToSelectedTab().catch(reportActionError);
     });
