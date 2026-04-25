@@ -470,7 +470,6 @@ searchInput.addEventListener("input", () => {
 sortButtons.forEach((button) => {
   button.addEventListener("click", () => {
     const selectedTabId = getSelectedTabId();
-    const previousScrollTop = list.scrollTop;
     sortMode = button.dataset.sortMode || "window";
     refreshVisibleTabs();
     selectedIndex = Math.max(
@@ -478,7 +477,9 @@ sortButtons.forEach((button) => {
       visibleTabs.findIndex((tab) => tab.id === selectedTabId)
     );
     renderTabs();
-    list.scrollTop = previousScrollTop;
+    if (sortMode === "recent") {
+      list.scrollTop = 0;
+    }
   });
 });
 

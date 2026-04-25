@@ -12,6 +12,7 @@ const DOCS_GROUP_COLOR = "blue";
 const TRANSIENT_RETRY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_DELAY_MS = 500;
 const TTS_SUCCESS_BADGE_MS = 3000;
+const ACTION_TITLE = "Tabcoach";
 const TAB_SWITCHER_PAGE = "tab-switcher.html";
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
@@ -41,6 +42,12 @@ const TRACKING_PARAMS = new Set([
 let pendingSyncTimer = null;
 let badgeResetTimer = null;
 let tabSwitcherPopupWindowId = null;
+let lastServerHealth = {
+  ok: null,
+  checkedAt: null,
+  message: "Not checked yet",
+  badgeText: ""
+};
 const recentTabCreations = new Map();
 
 function delay(ms) {
@@ -96,6 +103,75 @@ async function fetchLocalServer(label, url, options = {}) {
     });
     throw error;
   }
+}
+
+function getErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function setServerHealth(ok, message, badgeText = "") {
+  const visibleBadgeText = ok && !badgeText ? "OK" : badgeText;
+
+  lastServerHealth = {
+    ok,
+    checkedAt: new Date().toISOString(),
+    message,
+    badgeText: visibleBadgeText
+  };
+
+  if (ok) {
+    await chrome.action.setBadgeBackgroundColor({ color: badgeText ? "#b42318" : "#15803d" });
+    await chrome.action.setBadgeText({ text: visibleBadgeText });
+    await chrome.action.setTitle({ title: `${ACTION_TITLE}: server ok` });
+    return;
+  }
+
+  await chrome.action.setBadgeBackgroundColor({ color: "#b42318" });
+  await chrome.action.setBadgeText({ text: "ERR" });
+  await chrome.action.setTitle({ title: `${ACTION_TITLE}: server error - ${message}` });
+}
+
+async function restoreServerHealthBadge() {
+  if (lastServerHealth.ok === true) {
+    await chrome.action.setBadgeText({ text: lastServerHealth.badgeText });
+    await chrome.action.setBadgeBackgroundColor({ color: lastServerHealth.badgeText ? "#b42318" : "#15803d" });
+    await chrome.action.setTitle({ title: `${ACTION_TITLE}: server ok` });
+    return;
+  }
+
+  if (lastServerHealth.ok === false) {
+    await chrome.action.setBadgeBackgroundColor({ color: "#b42318" });
+    await chrome.action.setBadgeText({ text: "ERR" });
+    await chrome.action.setTitle({ title: `${ACTION_TITLE}: server error - ${lastServerHealth.message}` });
+    return;
+  }
+
+  await chrome.action.setBadgeText({ text: "" });
+  await chrome.action.setTitle({ title: ACTION_TITLE });
+}
+
+function logDuplicateGroups(duplicateGroups) {
+  if (!Array.isArray(duplicateGroups) || duplicateGroups.length === 0) {
+    return;
+  }
+
+  console.info(
+    "Tabcoach duplicate groups",
+    duplicateGroups.map((group) => ({
+      normalizedUrl: group.normalizedUrl,
+      count: group.count,
+      tabs: Array.isArray(group.tabs)
+        ? group.tabs.map((tab) => ({
+            title: tab.title,
+            url: tab.url,
+            windowId: tab.windowId,
+            tabId: tab.tabId,
+            active: tab.active,
+            pinned: tab.pinned
+          }))
+        : []
+    }))
+  );
 }
 
 function isTransientChromeEditError(error) {
@@ -365,13 +441,12 @@ async function pushSnapshot(reason) {
     }
 
     const result = await response.json();
+    logDuplicateGroups(result.duplicateGroups);
     const badgeText = result.duplicateGroupCount > 0 ? String(result.duplicateGroupCount) : "";
-    await chrome.action.setBadgeBackgroundColor({ color: "#b42318" });
-    await chrome.action.setBadgeText({ text: badgeText });
+    await setServerHealth(true, `Last sync ok from ${reason}`, badgeText);
   } catch (error) {
     console.error("Tabcoach sync failed", error);
-    await chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
-    await chrome.action.setBadgeText({ text: "!" });
+    await setServerHealth(false, getErrorMessage(error));
   }
 }
 
@@ -385,7 +460,7 @@ async function showTtsSuccessFeedback(selectedText) {
 
   badgeResetTimer = setTimeout(() => {
     badgeResetTimer = null;
-    void chrome.action.setBadgeText({ text: "" });
+    void restoreServerHealthBadge();
   }, TTS_SUCCESS_BADGE_MS);
 
   const notificationText = "Text-to-speech started";
