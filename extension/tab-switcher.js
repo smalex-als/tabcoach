@@ -1,8 +1,10 @@
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
+const DUPLICATE_TAB_MESSAGE = "tabcoach:duplicate-tab";
 const JUMP_NUMERIC_BOOKMARK_MESSAGE = "tabcoach:jump-numeric-bookmark";
 const POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE = "tabcoach:popup-numeric-bookmark-command";
 const FOCUS_TAB_SWITCHER_SEARCH_MESSAGE = "tabcoach:focus-tab-switcher-search";
+const REFRESH_TAB_SWITCHER_MESSAGE = "tabcoach:refresh-tab-switcher";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
@@ -48,6 +50,8 @@ const newTabButton = document.getElementById("newTabButton");
 const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
 
+document.body.classList.toggle("window-blurred", !document.hasFocus());
+
 let tabs = [];
 let duplicateCountsByTabId = new Map();
 let numericBookmarks = {};
@@ -60,6 +64,7 @@ let selectedIndex = 0;
 let keepOpenAfterSwitch = false;
 let draggedTabId = null;
 let dropTarget = null;
+let refreshTimer = null;
 
 function sendMessage(message) {
   return chrome.runtime.sendMessage({ windowId, ...message });
@@ -178,6 +183,18 @@ function refreshDuplicateCounts() {
   duplicateCountsByTabId = findDuplicateCountsByTabId(tabs);
 }
 
+function dedupeTabsById(items) {
+  const seenTabIds = new Set();
+  return items.filter((tab) => {
+    if (seenTabIds.has(tab.id)) {
+      return false;
+    }
+
+    seenTabIds.add(tab.id);
+    return true;
+  });
+}
+
 function refreshNumericBookmarkSlots() {
   numericBookmarkSlotsByNormalizedUrl = new Map();
 
@@ -261,6 +278,37 @@ function markActiveTab(tabId) {
   applyRowState();
 }
 
+function insertDuplicatedTab(sourceTabId, duplicatedTab) {
+  if (!keepOpenAfterSwitch || !duplicatedTab?.id) {
+    markActiveTab(duplicatedTab?.id);
+    return;
+  }
+
+  const sourceIndex = tabs.findIndex((tab) => tab.id === sourceTabId);
+  const sourceTab = sourceIndex >= 0 ? tabs[sourceIndex] : null;
+  const optimisticTab = {
+    ...sourceTab,
+    ...duplicatedTab,
+    active: true,
+    displayTitle: duplicatedTab.title || sourceTab?.displayTitle || sourceTab?.title || duplicatedTab.url || "Untitled tab",
+    bookmarked: Boolean(sourceTab?.bookmarked),
+    group: sourceTab?.group ?? null
+  };
+
+  tabs = tabs.filter((tab) => tab.id !== optimisticTab.id).map((tab) => ({ ...tab, active: false }));
+  if (sourceIndex >= 0) {
+    tabs.splice(sourceIndex + 1, 0, optimisticTab);
+  } else {
+    tabs.unshift(optimisticTab);
+  }
+
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabId(optimisticTab.id);
+  applyRowState();
+}
+
 function showShortcutNotification(message) {
   const hostId = "__tabcoach_shortcut_toast";
   const existingHost = document.getElementById(hostId);
@@ -330,6 +378,14 @@ async function switchToSelectedTab() {
 
 async function createNewTab() {
   await sendMessage({ type: CREATE_TAB_MESSAGE }).then((response) => assertResponse(response, "New tab failed"));
+  closeAfterSwitchIfNeeded();
+}
+
+async function duplicateTab(tabId) {
+  const response = await sendMessage({ type: DUPLICATE_TAB_MESSAGE, tabId }).then((result) =>
+    assertResponse(result, "Tab duplicate failed")
+  );
+  insertDuplicatedTab(tabId, response.tab);
   closeAfterSwitchIfNeeded();
 }
 
@@ -477,7 +533,7 @@ async function moveDraggedTab() {
       groupId: targetGroupId
     }).then((result) => assertResponse(result, "Tab move failed"));
 
-    tabs = response.tabs;
+    tabs = dedupeTabsById(response.tabs);
     refreshDuplicateCounts();
     refreshVisibleTabs();
     renderTabs();
@@ -563,10 +619,6 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     row.title = sortMode === "window" ? "Drag to reorder tabs" : "";
 
     const rowIndex = rows.length;
-    row.addEventListener("mouseenter", () => {
-      selectedIndex = rowIndex;
-      applyRowState();
-    });
     row.addEventListener("click", () => {
       selectedIndex = rowIndex;
       void switchToSelectedTab().catch(reportActionError);
@@ -667,6 +719,13 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     );
     bookmarkButton.dataset.bookmarked = String(Boolean(tab.bookmarked));
 
+    const duplicateButton = createButton(
+      "duplicate",
+      "+",
+      `Duplicate ${tab.displayTitle || tab.title || tab.url || "tab"}`,
+      () => duplicateTab(tab.id)
+    );
+
     const copyButton = createButton("copy", "⧉", `Copy URL for ${tab.displayTitle || tab.title || tab.url || "tab"}`, async (button) => {
       const copied = await copyTabUrl(tab.id);
       button.textContent = copied ? "✓" : "!";
@@ -681,7 +740,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     const closeTabButton = createButton("close", "×", `Close ${tab.displayTitle || tab.title || tab.url || "tab"}`, () => closeTab(tab.id));
 
     text.append(tabTitle, tabUrl);
-    row.append(icon, text, status, bookmarkButton, copyButton, closeTabButton);
+    row.append(icon, text, status, bookmarkButton, duplicateButton, copyButton, closeTabButton);
     rows.push(row);
     list.appendChild(row);
   });
@@ -696,6 +755,7 @@ async function loadTabs() {
   }
 
   try {
+    const selectedTabId = document.body.classList.contains("window-blurred") ? null : getSelectedTabId();
     const response = await sendMessage({ type: GET_TAB_SWITCHER_ITEMS_MESSAGE }).then((result) =>
       assertResponse(result, "Could not load tabs")
     );
@@ -703,16 +763,27 @@ async function loadTabs() {
     numericBookmarks = stored[NUMERIC_BOOKMARKS_KEY] || {};
     keepOpenAfterSwitch = Boolean(stored[SWITCHER_OPEN_LEFT_KEY]);
     refreshNumericBookmarkSlots();
-    tabs = response.tabs;
+    tabs = dedupeTabsById(response.tabs);
     refreshDuplicateCounts();
     refreshVisibleTabs();
     renderTabs({ scrollBlock: "center" });
-    selectedIndex = getRowIndexForTabId(visibleTabs.find((tab) => tab.active)?.id);
+    selectedIndex = getRowIndexForTabId(selectedTabId || visibleTabs.find((tab) => tab.active)?.id);
     applyRowState("center");
     searchInput.focus();
   } catch (error) {
     setError(error instanceof Error ? error.message : String(error));
   }
+}
+
+function scheduleRefreshTabs() {
+  if (refreshTimer !== null) {
+    clearTimeout(refreshTimer);
+  }
+
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    void loadTabs();
+  }, 120);
 }
 
 closeButton.addEventListener("click", () => {
@@ -721,6 +792,14 @@ closeButton.addEventListener("click", () => {
 
 newTabButton.addEventListener("click", () => {
   void createNewTab().catch(reportActionError);
+});
+
+window.addEventListener("focus", () => {
+  document.body.classList.remove("window-blurred");
+});
+
+window.addEventListener("blur", () => {
+  document.body.classList.add("window-blurred");
 });
 
 searchInput.addEventListener("input", () => {
@@ -772,6 +851,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === FOCUS_TAB_SWITCHER_SEARCH_MESSAGE) {
     searchInput.focus();
     searchInput.select();
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message?.type === REFRESH_TAB_SWITCHER_MESSAGE) {
+    if (message.windowId === null || message.windowId === windowId) {
+      scheduleRefreshTabs();
+    }
     sendResponse({ ok: true });
     return true;
   }

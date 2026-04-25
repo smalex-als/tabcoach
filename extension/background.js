@@ -27,9 +27,11 @@ const ACTION_TITLE = "Tabcoach";
 const TAB_SWITCHER_PAGE = "tab-switcher.html";
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
+const DUPLICATE_TAB_MESSAGE = "tabcoach:duplicate-tab";
 const JUMP_NUMERIC_BOOKMARK_MESSAGE = "tabcoach:jump-numeric-bookmark";
 const POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE = "tabcoach:popup-numeric-bookmark-command";
 const FOCUS_TAB_SWITCHER_SEARCH_MESSAGE = "tabcoach:focus-tab-switcher-search";
+const REFRESH_TAB_SWITCHER_MESSAGE = "tabcoach:refresh-tab-switcher";
 const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
@@ -1285,6 +1287,38 @@ async function createTabFromSwitcher(context = {}) {
   }
 }
 
+async function duplicateTabFromSwitcher(tabId, context = {}) {
+  if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
+    throw new Error("Invalid tab id");
+  }
+
+  const sourceTab = await chrome.tabs.get(tabId);
+  assertTabInSwitcherWindow(sourceTab, context, "duplicate");
+
+  if (!sourceTab.url || typeof sourceTab.url !== "string") {
+    throw new Error("Cannot duplicate tab without a URL");
+  }
+
+  const duplicatedTab = await chrome.tabs.create({
+    windowId: sourceTab.windowId,
+    index: typeof sourceTab.index === "number" ? sourceTab.index + 1 : undefined,
+    url: sourceTab.url,
+    active: true,
+    pinned: Boolean(sourceTab.pinned)
+  });
+  markTabCreated(duplicatedTab.id);
+
+  if (typeof sourceTab.groupId === "number" && sourceTab.groupId >= 0 && typeof duplicatedTab.id === "number") {
+    await chrome.tabs.group({ groupId: sourceTab.groupId, tabIds: [duplicatedTab.id] });
+  }
+
+  if (typeof duplicatedTab.windowId === "number") {
+    await chrome.windows.update(duplicatedTab.windowId, { focused: true });
+  }
+
+  return duplicatedTab;
+}
+
 async function jumpToNumericBookmark(bookmark, context = {}) {
   const windowId = getSwitcherContextWindowId(context);
   if (typeof windowId !== "number") {
@@ -1503,6 +1537,15 @@ function scheduleSync(reason) {
   }, SYNC_DEBOUNCE_MS);
 }
 
+function notifyTabSwitcherRefresh(windowId = null) {
+  void chrome.runtime
+    .sendMessage({
+      type: REFRESH_TAB_SWITCHER_MESSAGE,
+      windowId: typeof windowId === "number" ? windowId : null
+    })
+    .catch(() => {});
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   void createSyncAlarm();
   void pushSnapshot("installed");
@@ -1539,24 +1582,28 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.tabs.onCreated.addListener((tab) => {
   markTabCreated(tab?.id);
+  notifyTabSwitcherRefresh(tab?.windowId);
   scheduleSync("tab-created");
 });
 
-chrome.tabs.onUpdated.addListener((tabId) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (typeof tabId === "number") {
     cleanupRecentTabCreations();
   }
+  notifyTabSwitcherRefresh(tab?.windowId);
   scheduleSync("tab-updated");
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   if (typeof tabId === "number") {
     recentTabCreations.delete(tabId);
   }
+  notifyTabSwitcherRefresh(removeInfo?.windowId);
   scheduleSync("tab-removed");
 });
 
-chrome.tabs.onActivated.addListener(() => {
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  notifyTabSwitcherRefresh(activeInfo?.windowId);
   scheduleSync("tab-activated");
 });
 
@@ -1598,6 +1645,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach tab create failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === DUPLICATE_TAB_MESSAGE) {
+    void duplicateTabFromSwitcher(message.tabId, switcherContext)
+      .then((tab) => {
+        sendResponse({ ok: true, tab: tab ? normalizeTab(tab) : null });
+      })
+      .catch((error) => {
+        console.error("Tabcoach tab duplicate failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 
