@@ -1,11 +1,17 @@
-const SERVER_URL = "http://127.0.0.1:3847/api/sync";
-const TTS_SELECTION_URL = "http://127.0.0.1:3847/api/tts-selection";
-const TAB_SWITCH_LOG_URL = "http://127.0.0.1:3847/api/tab-switch";
-const TAB_EVENT_LOG_URL = "http://127.0.0.1:3847/api/tab-event";
-const LOCAL_SERVER_PERMISSION_PATTERN = "http://127.0.0.1:3847/*";
+const DEFAULT_SETTINGS = {
+  serverBaseUrl: "http://127.0.0.1:3847",
+  autoCloseDuplicates: true,
+  docsGrouping: true,
+  fetchDiagnostics: true,
+  syncIntervalMinutes: 1,
+  badgeMode: "both"
+};
+const SYNC_ENDPOINT = "/api/sync";
+const TTS_SELECTION_ENDPOINT = "/api/tts-selection";
+const TAB_SWITCH_LOG_ENDPOINT = "/api/tab-switch";
+const TAB_EVENT_LOG_ENDPOINT = "/api/tab-event";
 const SYNC_ALARM = "tabcoach-sync";
 const SYNC_DEBOUNCE_MS = 1500;
-const AUTO_CLOSE_DUPLICATES = true;
 const NEW_TAB_DUPLICATE_GRACE_MS = 3 * 60 * 1000;
 const DOCS_GROUP_TITLE = "Docs";
 const DOCS_GROUP_COLOR = "blue";
@@ -42,6 +48,7 @@ const TRACKING_PARAMS = new Set([
 let pendingSyncTimer = null;
 let badgeResetTimer = null;
 let tabSwitcherPopupWindowId = null;
+let settingsCache = null;
 let lastServerHealth = {
   ok: null,
   checkedAt: null,
@@ -54,41 +61,89 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sanitizeSettings(settings) {
+  const syncIntervalMinutes = Number(settings.syncIntervalMinutes);
+  const serverBaseUrl = typeof settings.serverBaseUrl === "string" && settings.serverBaseUrl.trim()
+    ? settings.serverBaseUrl.trim().replace(/\/+$/, "")
+    : DEFAULT_SETTINGS.serverBaseUrl;
+  const badgeModes = new Set(["both", "health", "duplicates"]);
+
+  return {
+    serverBaseUrl,
+    autoCloseDuplicates: Boolean(settings.autoCloseDuplicates),
+    docsGrouping: Boolean(settings.docsGrouping),
+    fetchDiagnostics: Boolean(settings.fetchDiagnostics),
+    syncIntervalMinutes: Number.isFinite(syncIntervalMinutes) && syncIntervalMinutes >= 1 ? syncIntervalMinutes : DEFAULT_SETTINGS.syncIntervalMinutes,
+    badgeMode: badgeModes.has(settings.badgeMode) ? settings.badgeMode : DEFAULT_SETTINGS.badgeMode
+  };
+}
+
+async function getSettings() {
+  if (settingsCache) {
+    return settingsCache;
+  }
+
+  const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+  settingsCache = sanitizeSettings(stored);
+  return settingsCache;
+}
+
+function getLocalServerPermissionPattern(settings) {
+  return `${settings.serverBaseUrl}/*`;
+}
+
+function getServerUrl(settings, endpoint) {
+  return `${settings.serverBaseUrl}${endpoint}`;
+}
+
+async function createSyncAlarm() {
+  const settings = await getSettings();
+  await chrome.alarms.clear(SYNC_ALARM);
+  chrome.alarms.create(SYNC_ALARM, { periodInMinutes: settings.syncIntervalMinutes });
+}
+
 async function hasLocalServerHostPermission() {
   try {
     if (!chrome.permissions?.contains) {
       return null;
     }
 
-    return await chrome.permissions.contains({ origins: [LOCAL_SERVER_PERMISSION_PATTERN] });
+    const settings = await getSettings();
+    return await chrome.permissions.contains({ origins: [getLocalServerPermissionPattern(settings)] });
   } catch (error) {
     console.warn("Tabcoach local fetch permission check failed", error);
     return null;
   }
 }
 
-async function fetchLocalServer(label, url, options = {}) {
+async function fetchLocalServer(label, endpoint, options = {}, settings = null) {
+  const activeSettings = settings ?? (await getSettings());
   const method = options.method ?? "GET";
   const hasHostPermission = await hasLocalServerHostPermission();
+  const url = getServerUrl(activeSettings, endpoint);
 
-  console.info("Tabcoach local fetch start", {
-    label,
-    method,
-    url,
-    hasHostPermission
-  });
-
-  try {
-    const response = await fetch(url, options);
-    console.info("Tabcoach local fetch response", {
+  if (activeSettings.fetchDiagnostics) {
+    console.info("Tabcoach local fetch start", {
       label,
       method,
       url,
-      hasHostPermission,
-      ok: response.ok,
-      status: response.status,
-      statusText: response.statusText
+      hasHostPermission
     });
+  }
+
+  try {
+    const response = await fetch(url, options);
+    if (activeSettings.fetchDiagnostics) {
+      console.info("Tabcoach local fetch response", {
+        label,
+        method,
+        url,
+        hasHostPermission,
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText
+      });
+    }
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -110,7 +165,14 @@ function getErrorMessage(error) {
 }
 
 async function setServerHealth(ok, message, badgeText = "") {
-  const visibleBadgeText = ok && !badgeText ? "OK" : badgeText;
+  const settings = await getSettings();
+  const visibleBadgeText = ok
+    ? settings.badgeMode === "health"
+      ? "OK"
+      : settings.badgeMode === "duplicates"
+        ? badgeText
+        : badgeText || "OK"
+    : "ERR";
 
   lastServerHealth = {
     ok,
@@ -341,8 +403,8 @@ function compareTabsForKeep(left, right) {
   return (left.id ?? Number.MAX_SAFE_INTEGER) - (right.id ?? Number.MAX_SAFE_INTEGER);
 }
 
-async function closeDuplicateTabs(tabs) {
-  if (!AUTO_CLOSE_DUPLICATES) {
+async function closeDuplicateTabs(tabs, settings) {
+  if (!settings.autoCloseDuplicates) {
     return;
   }
 
@@ -365,7 +427,11 @@ async function closeDuplicateTabs(tabs) {
   }
 }
 
-async function ensureDocsGroup(protectedWindowId = null) {
+async function ensureDocsGroup(protectedWindowId = null, settings) {
+  if (!settings.docsGrouping) {
+    return;
+  }
+
   const windows = await chrome.windows.getAll({ populate: true, windowTypes: ["normal"] });
   const docsTabs = windows
     .flatMap((window) => window.tabs ?? [])
@@ -419,12 +485,13 @@ async function ensureDocsGroup(protectedWindowId = null) {
 
 async function pushSnapshot(reason) {
   try {
+    const settings = await getSettings();
     const protectedWindowId = await getFocusedWindowId();
     const tabs = await collectTabs();
-    await closeDuplicateTabs(tabs);
-    await ensureDocsGroup(protectedWindowId);
+    await closeDuplicateTabs(tabs, settings);
+    await ensureDocsGroup(protectedWindowId, settings);
     const refreshedTabs = await collectTabs();
-    const response = await fetchLocalServer("sync", SERVER_URL, {
+    const response = await fetchLocalServer("sync", SYNC_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -434,7 +501,7 @@ async function pushSnapshot(reason) {
         capturedAt: new Date().toISOString(),
         tabs: refreshedTabs
       })
-    });
+    }, settings);
 
     if (!response.ok) {
       throw new Error(`Server returned ${response.status}`);
@@ -602,7 +669,8 @@ async function sendSelectionToTts() {
     throw new Error("No selected text found");
   }
 
-  const response = await fetchLocalServer("tts-selection", TTS_SELECTION_URL, {
+  const settings = await getSettings();
+  const response = await fetchLocalServer("tts-selection", TTS_SELECTION_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -613,7 +681,7 @@ async function sendSelectionToTts() {
       pageTitle: activeTab.title ?? "",
       pageUrl: activeTab.url ?? ""
     })
-  });
+  }, settings);
 
   if (!response.ok) {
     throw new Error(`TTS server returned ${response.status}`);
@@ -853,7 +921,7 @@ async function switchToTab(tabId, context = {}) {
 
   await chrome.tabs.update(tabId, { active: true });
 
-  void fetchLocalServer("tab-switch-log", TAB_SWITCH_LOG_URL, {
+  void fetchLocalServer("tab-switch-log", TAB_SWITCH_LOG_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -986,7 +1054,7 @@ async function copyTabUrlFromSwitcher(tabId, url, context = {}) {
 }
 
 async function logTabEventFromSwitcher(payload) {
-  const response = await fetchLocalServer("tab-event-log", TAB_EVENT_LOG_URL, {
+  const response = await fetchLocalServer("tab-event-log", TAB_EVENT_LOG_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -1017,13 +1085,25 @@ function scheduleSync(reason) {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create(SYNC_ALARM, { periodInMinutes: 1 });
+  void createSyncAlarm();
   void pushSnapshot("installed");
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create(SYNC_ALARM, { periodInMinutes: 1 });
+  void createSyncAlarm();
   void pushSnapshot("startup");
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "sync") {
+    return;
+  }
+
+  settingsCache = null;
+  if (changes.syncIntervalMinutes) {
+    void createSyncAlarm();
+  }
+  void pushSnapshot("settings-changed");
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {

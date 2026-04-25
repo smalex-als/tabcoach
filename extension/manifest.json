@@ -3,7 +3,11 @@
   "name": "Tabcoach",
   "version": "0.1.0",
   "description": "Sync open Chrome tabs to a local Tabcoach server.",
-  "permissions": ["tabs", "tabGroups", "alarms", "scripting", "activeTab", "notifications", "bookmarks", "clipboardWrite"],
+  "permissions": ["tabs", "tabGroups", "alarms", "scripting", "activeTab", "notifications", "bookmarks", "clipboardWrite", "storage"],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
   "background": {
     "service_worker": "background.js"
   },

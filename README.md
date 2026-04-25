@@ -80,11 +80,13 @@ The extension will:
 - sync every minute
 - auto-close duplicate tabs conservatively
 - group Google Docs, Sheets, and Slides tabs into a blue `Docs` tab group
-- show the duplicate-group count as the extension badge text
+- show server health and duplicate-group count as extension badge text
 - show, drag-reorder, bookmark, copy URLs, close, and switch between tabs in the current window with `Command+E` on macOS, including tab group labels and recently visited sorting
 - store bookmarks under `Tabcoach/<tab group name>` to keep saved tabs organized
 - send selected page text to the local TTS flow with `Command+Shift+S` on macOS
 - show a badge and notification when TTS is started successfully
+
+Extension settings are available from `chrome://extensions` -> `Tabcoach` -> `Details` -> `Extension options`.
 
 Auto-close rules:
 
