@@ -29,6 +29,7 @@ const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
 const JUMP_NUMERIC_BOOKMARK_MESSAGE = "tabcoach:jump-numeric-bookmark";
 const POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE = "tabcoach:popup-numeric-bookmark-command";
+const FOCUS_TAB_SWITCHER_SEARCH_MESSAGE = "tabcoach:focus-tab-switcher-search";
 const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
@@ -927,40 +928,41 @@ function isTabSwitcherUrl(rawUrl) {
   }
 }
 
-async function closeTabSwitcherPopup(commandTab = null) {
-  const popupWindowIds = new Set();
+async function focusTabSwitcherPopup(commandTab = null) {
+  const popupWindowIds = [];
 
   if (typeof commandTab?.windowId === "number" && isTabSwitcherUrl(commandTab.url)) {
-    popupWindowIds.add(commandTab.windowId);
+    popupWindowIds.push(commandTab.windowId);
   }
 
   if (typeof tabSwitcherPopupWindowId === "number") {
-    popupWindowIds.add(tabSwitcherPopupWindowId);
+    popupWindowIds.push(tabSwitcherPopupWindowId);
   }
 
   const tabs = await chrome.tabs.query({});
   tabs.forEach((tab) => {
     if (typeof tab.windowId === "number" && isTabSwitcherUrl(tab.url)) {
-      popupWindowIds.add(tab.windowId);
+      popupWindowIds.push(tab.windowId);
     }
   });
 
-  if (popupWindowIds.size === 0) {
+  const [windowId] = [...new Set(popupWindowIds)];
+  if (typeof windowId !== "number") {
     return false;
   }
 
-  await Promise.all(
-    [...popupWindowIds].map(async (windowId) => {
-      try {
-        await chrome.windows.remove(windowId);
-      } catch (error) {
-        console.warn("Tabcoach tab switcher close failed", error);
-      }
-    })
-  );
+  try {
+    await chrome.windows.update(windowId, { focused: true });
+    await chrome.runtime.sendMessage({ type: FOCUS_TAB_SWITCHER_SEARCH_MESSAGE }).catch(() => {});
+  } catch (error) {
+    console.warn("Tabcoach tab switcher focus failed", error);
+    if (windowId === tabSwitcherPopupWindowId) {
+      tabSwitcherPopupWindowId = null;
+    }
+    return false;
+  }
 
-  tabSwitcherPopupWindowId = null;
-  tabSwitcherSourceWindowId = null;
+  tabSwitcherPopupWindowId = windowId;
   return true;
 }
 
@@ -1699,7 +1701,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.commands.onCommand.addListener((command, tab) => {
   if (command === "show-tab-switcher") {
     void (async () => {
-      if (await closeTabSwitcherPopup(tab)) {
+      if (await focusTabSwitcherPopup(tab)) {
         return;
       }
 

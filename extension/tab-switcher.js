@@ -2,6 +2,7 @@ const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
 const JUMP_NUMERIC_BOOKMARK_MESSAGE = "tabcoach:jump-numeric-bookmark";
 const POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE = "tabcoach:popup-numeric-bookmark-command";
+const FOCUS_TAB_SWITCHER_SEARCH_MESSAGE = "tabcoach:focus-tab-switcher-search";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
@@ -248,6 +249,18 @@ function closeAfterSwitchIfNeeded() {
   }
 }
 
+function markActiveTab(tabId) {
+  if (!keepOpenAfterSwitch || typeof tabId !== "number") {
+    return;
+  }
+
+  tabs = tabs.map((tab) => ({ ...tab, active: tab.id === tabId }));
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabId(tabId);
+  applyRowState();
+}
+
 function showShortcutNotification(message) {
   const hostId = "__tabcoach_shortcut_toast";
   const existingHost = document.getElementById(hostId);
@@ -311,6 +324,7 @@ async function switchToSelectedTab() {
   }
 
   await sendMessage({ type: SWITCH_TAB_MESSAGE, tabId }).then((response) => assertResponse(response, "Tab switch failed"));
+  markActiveTab(tabId);
   closeAfterSwitchIfNeeded();
 }
 
@@ -755,6 +769,13 @@ list.addEventListener("drop", (event) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === FOCUS_TAB_SWITCHER_SEARCH_MESSAGE) {
+    searchInput.focus();
+    searchInput.select();
+    sendResponse({ ok: true });
+    return true;
+  }
+
   if (message?.type !== POPUP_NUMERIC_BOOKMARK_COMMAND_MESSAGE || message.windowId !== windowId) {
     return false;
   }
