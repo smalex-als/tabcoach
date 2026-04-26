@@ -1039,6 +1039,7 @@ function addTabDisplayTitles(items) {
 function toTabSwitcherItem(tab, group = null) {
   return {
     id: tab.id,
+    windowId: tab.windowId,
     title: tab.title ?? "",
     url: tab.url ?? "",
     active: Boolean(tab.active),
@@ -1421,6 +1422,8 @@ async function assignNumericBookmarkFromActiveTab(slot, commandTab = null) {
       [slot]: {
         title: activeTab.title || activeTab.url || "Untitled tab",
         url: activeTab.url,
+        tabId: activeTab.id,
+        windowId: activeTab.windowId,
         normalizedUrl: normalizeUrl(activeTab.url),
         assignedAt: new Date().toISOString()
       }
@@ -1436,7 +1439,7 @@ async function jumpToNumericBookmarkSlot(slot, commandTab = null) {
   const stored = await chrome.storage.sync.get({ [NUMERIC_BOOKMARKS_KEY]: {} });
   const bookmark = stored[NUMERIC_BOOKMARKS_KEY]?.[slot];
 
-  const targetTab = await jumpToNumericBookmark(bookmark, { windowId });
+  const targetTab = await jumpToNumericBookmark(bookmark, { windowId }, slot);
   await showNumericBookmarkFeedback(slot, "jump", targetTab, bookmark?.title || bookmark?.url);
 }
 
@@ -1557,7 +1560,33 @@ async function duplicateTabFromSwitcher(tabId, context = {}) {
   return duplicatedTab;
 }
 
-async function jumpToNumericBookmark(bookmark, context = {}) {
+async function updateNumericBookmarkTabBinding(slot, bookmark, tab) {
+  if (slot === null || slot === undefined || !bookmark || !tab || typeof tab.id !== "number") {
+    return;
+  }
+
+  const stored = await chrome.storage.sync.get({ [NUMERIC_BOOKMARKS_KEY]: {} });
+  const numericBookmarks = stored[NUMERIC_BOOKMARKS_KEY] || {};
+  const currentBookmark = numericBookmarks[slot] || bookmark;
+  const tabUrl = typeof tab.url === "string" && tab.url ? tab.url : currentBookmark.url;
+
+  await chrome.storage.sync.set({
+    [NUMERIC_BOOKMARKS_KEY]: {
+      ...numericBookmarks,
+      [slot]: {
+        ...currentBookmark,
+        title: tab.title || currentBookmark.title || tabUrl || "Untitled tab",
+        url: tabUrl,
+        tabId: tab.id,
+        windowId: tab.windowId,
+        normalizedUrl: typeof tabUrl === "string" ? normalizeUrl(tabUrl) : currentBookmark.normalizedUrl,
+        lastOpenedAt: new Date().toISOString()
+      }
+    }
+  });
+}
+
+async function jumpToNumericBookmark(bookmark, context = {}, slot = null) {
   const windowId = getSwitcherContextWindowId(context);
   if (typeof windowId !== "number") {
     throw new Error("Invalid window id");
@@ -1567,12 +1596,26 @@ async function jumpToNumericBookmark(bookmark, context = {}) {
     throw new Error("No numeric bookmark saved in this slot");
   }
 
+  if (typeof bookmark.tabId === "number") {
+    try {
+      const boundTab = await chrome.tabs.get(bookmark.tabId);
+      if (boundTab.windowId === windowId && !isTabSwitcherUrl(boundTab.url)) {
+        await switchToTab(boundTab.id, context);
+        await updateNumericBookmarkTabBinding(slot, bookmark, boundTab);
+        return boundTab;
+      }
+    } catch {
+      // The previously bound tab was closed; fall back to URL matching below.
+    }
+  }
+
   const normalizedUrl = typeof bookmark.normalizedUrl === "string" ? bookmark.normalizedUrl : normalizeUrl(bookmark.url);
   const windowTabs = await chrome.tabs.query({ windowId });
   const matchingTab = windowTabs.find((tab) => typeof tab.url === "string" && normalizeUrl(tab.url) === normalizedUrl);
 
   if (typeof matchingTab?.id === "number") {
     await switchToTab(matchingTab.id, context);
+    await updateNumericBookmarkTabBinding(slot, bookmark, matchingTab);
     return matchingTab;
   }
 
@@ -1593,6 +1636,7 @@ async function jumpToNumericBookmark(bookmark, context = {}) {
     await chrome.windows.update(tab.windowId, { focused: true });
   }
 
+  await updateNumericBookmarkTabBinding(slot, bookmark, tab);
   return tab;
 }
 
@@ -2168,7 +2212,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === JUMP_NUMERIC_BOOKMARK_MESSAGE) {
-    void jumpToNumericBookmark(message.bookmark, switcherContext)
+    void jumpToNumericBookmark(message.bookmark, switcherContext, message.slot)
       .then(() => {
         sendResponse({ ok: true });
       })

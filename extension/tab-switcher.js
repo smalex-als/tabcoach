@@ -549,6 +549,8 @@ async function assignNumericBookmark(slot) {
     [slot]: {
       title: tab.displayTitle || tab.title || tab.url || "Untitled tab",
       url: tab.url,
+      tabId: tab.id,
+      windowId: tab.windowId,
       normalizedUrl: normalizeUrl(tab.url),
       assignedAt: new Date().toISOString()
     }
@@ -563,7 +565,7 @@ async function assignNumericBookmark(slot) {
 
 async function jumpToNumericBookmark(slot) {
   const bookmark = numericBookmarks[slot];
-  await sendMessage({ type: JUMP_NUMERIC_BOOKMARK_MESSAGE, bookmark }).then((response) =>
+  await sendMessage({ type: JUMP_NUMERIC_BOOKMARK_MESSAGE, slot, bookmark }).then((response) =>
     assertResponse(response, `No numeric bookmark saved in slot ${slot}`)
   );
   closeAfterSwitchIfNeeded();
