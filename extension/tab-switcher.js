@@ -8,6 +8,7 @@ const REFRESH_TAB_SWITCHER_MESSAGE = "tabcoach:refresh-tab-switcher";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
+const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
@@ -57,6 +58,7 @@ let numericBookmarks = {};
 let numericBookmarkSlotsByNormalizedUrl = new Map();
 let visibleTabs = [];
 let rows = [];
+let tabRows = [];
 let sortMode = "window";
 let searchQuery = "";
 let selectedIndex = 0;
@@ -65,6 +67,7 @@ let draggedTabId = null;
 let dropTarget = null;
 let refreshTimer = null;
 let suppressNextRowClick = false;
+let pointerDownRowIndex = null;
 
 function sendMessage(message) {
   return chrome.runtime.sendMessage({ windowId, ...message });
@@ -250,9 +253,28 @@ function getSelectedTabId() {
   return Number.isFinite(tabId) ? tabId : null;
 }
 
+function getSelectedGroupId() {
+  const groupId = Number(rows[selectedIndex]?.dataset.tabcoachGroupId);
+  return Number.isInteger(groupId) && groupId >= 0 ? groupId : null;
+}
+
 function getRowIndexForTabId(tabId) {
   const rowIndex = rows.findIndex((row) => Number(row.dataset.tabcoachTabId) === tabId);
   return rowIndex >= 0 ? rowIndex : 0;
+}
+
+function getRowIndexForGroupId(groupId) {
+  const rowIndex = rows.findIndex((row) => Number(row.dataset.tabcoachGroupId) === groupId && !row.dataset.tabcoachTabId);
+  return rowIndex >= 0 ? rowIndex : 0;
+}
+
+function getRowIndexForTabOrGroup(tabId) {
+  const tab = visibleTabs.find((item) => item.id === tabId);
+  if (tab?.group?.collapsed) {
+    return getRowIndexForGroupId(tab.group.id);
+  }
+
+  return getRowIndexForTabId(tabId);
 }
 
 function getNumericShortcutSlot(event) {
@@ -274,7 +296,7 @@ function markActiveTab(tabId) {
   tabs = tabs.map((tab) => ({ ...tab, active: tab.id === tabId }));
   refreshVisibleTabs();
   renderTabs();
-  selectedIndex = getRowIndexForTabId(tabId);
+  selectedIndex = getRowIndexForTabOrGroup(tabId);
   applyRowState();
 }
 
@@ -306,6 +328,30 @@ function insertDuplicatedTab(sourceTabId, duplicatedTab) {
   refreshVisibleTabs();
   renderTabs();
   selectedIndex = getRowIndexForTabId(optimisticTab.id);
+  applyRowState();
+}
+
+async function setGroupCollapsed(groupId, collapsed) {
+  if (typeof groupId !== "number") {
+    return;
+  }
+
+  const selectedTabId = getSelectedTabId();
+  const response = await sendMessage({ type: SET_GROUP_COLLAPSED_MESSAGE, groupId, collapsed }).then((result) =>
+    assertResponse(result, "Group update failed")
+  );
+  tabs = dedupeTabsById(response.tabs);
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+
+  if (collapsed) {
+    selectedIndex = getRowIndexForGroupId(groupId);
+  } else {
+    const firstGroupTab = visibleTabs.find((tab) => tab.group?.id === groupId);
+    selectedIndex = getRowIndexForTabId(selectedTabId || firstGroupTab?.id);
+  }
+
   applyRowState();
 }
 
@@ -368,6 +414,10 @@ function showShortcutNotification(message) {
 async function switchToSelectedTab() {
   const tabId = getSelectedTabId();
   if (tabId === null) {
+    const groupId = getSelectedGroupId();
+    if (groupId !== null) {
+      await setGroupCollapsed(groupId, false);
+    }
     return;
   }
 
@@ -491,15 +541,20 @@ function logCopyTabUrl(tab, copied) {
 
 function clearDropTarget() {
   dropTarget = null;
-  rows.forEach((row) => {
+  tabRows.forEach((row) => {
     row.classList.remove("drop-before", "drop-after");
   });
 }
 
 function updateDropTarget(row, position) {
+  const tabId = Number(row.dataset.tabcoachTabId);
+  if (!Number.isFinite(tabId)) {
+    return;
+  }
+
   clearDropTarget();
   dropTarget = {
-    tabId: Number(row.dataset.tabcoachTabId),
+    tabId,
     groupId: Number(row.dataset.tabcoachGroupId),
     position
   };
@@ -537,7 +592,7 @@ async function moveDraggedTab() {
     refreshDuplicateCounts();
     refreshVisibleTabs();
     renderTabs();
-    selectedIndex = getRowIndexForTabId(selectedTabId) || getRowIndexForTabId(draggedTabId);
+    selectedIndex = getRowIndexForTabOrGroup(selectedTabId) || getRowIndexForTabOrGroup(draggedTabId);
     applyRowState();
   } finally {
     draggedTabId = null;
@@ -567,6 +622,7 @@ function createButton(className, text, label, onClick) {
 
 function renderTabs({ scrollBlock = "nearest" } = {}) {
   rows = [];
+  tabRows = [];
   list.replaceChildren();
   updateSortButtons();
 
@@ -580,6 +636,13 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
   }
 
   const showGroupSections = sortMode === "window" && visibleTabs.some((tab) => tab.group);
+  const tabCountsBySectionKey = new Map();
+  if (showGroupSections) {
+    visibleTabs.forEach((tab) => {
+      const sectionKey = tab.group ? `group:${tab.group.id}` : "ungrouped";
+      tabCountsBySectionKey.set(sectionKey, (tabCountsBySectionKey.get(sectionKey) ?? 0) + 1);
+    });
+  }
   let lastSectionKey = null;
 
   visibleTabs.forEach((tab, index) => {
@@ -596,12 +659,42 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
         const sectionTitle = document.createElement("span");
         sectionTitle.className = "section-title";
         sectionTitle.textContent = tab.group
-          ? `${tab.group.title || "Unnamed group"}${tab.group.collapsed ? " (collapsed)" : ""}`
+          ? `${tab.group.title || "Unnamed group"}${tab.group.collapsed ? ` (${tabCountsBySectionKey.get(sectionKey) ?? 0} collapsed)` : ""}`
           : "Ungrouped";
 
         sectionHeader.append(swatch, sectionTitle);
+        if (tab.group?.collapsed) {
+          sectionHeader.classList.add("section-header-collapsed");
+          sectionHeader.setAttribute("role", "option");
+          sectionHeader.tabIndex = -1;
+          sectionHeader.dataset.tabcoachGroupId = String(tab.group.id);
+          const rowIndex = rows.length;
+          sectionHeader.addEventListener("pointerdown", (event) => {
+            if (event.button !== 0) {
+              return;
+            }
+
+            selectedIndex = rowIndex;
+            suppressNextRowClick = true;
+            void setGroupCollapsed(tab.group.id, false).catch(reportActionError);
+          });
+          sectionHeader.addEventListener("click", () => {
+            if (suppressNextRowClick) {
+              suppressNextRowClick = false;
+              return;
+            }
+
+            selectedIndex = rowIndex;
+            void setGroupCollapsed(tab.group.id, false).catch(reportActionError);
+          });
+          rows.push(sectionHeader);
+        }
         list.appendChild(sectionHeader);
         lastSectionKey = sectionKey;
+      }
+
+      if (tab.group?.collapsed) {
+        return;
       }
     }
 
@@ -622,15 +715,17 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
       }
 
       selectedIndex = rowIndex;
-      suppressNextRowClick = true;
-      void switchToSelectedTab().catch(reportActionError);
+      pointerDownRowIndex = rowIndex;
+      applyRowState();
     });
     row.addEventListener("click", (event) => {
-      if (suppressNextRowClick) {
+      if (suppressNextRowClick || pointerDownRowIndex !== rowIndex) {
         suppressNextRowClick = false;
+        pointerDownRowIndex = null;
         return;
       }
 
+      pointerDownRowIndex = null;
       selectedIndex = rowIndex;
       void switchToSelectedTab().catch(reportActionError);
     });
@@ -646,6 +741,8 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
       }
 
       draggedTabId = tab.id;
+      pointerDownRowIndex = null;
+      suppressNextRowClick = true;
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", String(tab.id));
       row.style.opacity = "0.55";
@@ -654,6 +751,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
       row.style.opacity = "1";
       clearDropTarget();
       draggedTabId = null;
+      pointerDownRowIndex = null;
     });
     row.addEventListener("dragover", (event) => {
       if (sortMode !== "window" || draggedTabId === null || draggedTabId === tab.id) {
@@ -753,6 +851,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     text.append(tabTitle, tabUrl);
     row.append(icon, text, status, bookmarkButton, duplicateButton, copyButton, closeTabButton);
     rows.push(row);
+    tabRows.push(row);
     list.appendChild(row);
   });
 
@@ -778,7 +877,7 @@ async function loadTabs() {
     refreshDuplicateCounts();
     refreshVisibleTabs();
     renderTabs({ scrollBlock: "center" });
-    selectedIndex = getRowIndexForTabId(selectedTabId || visibleTabs.find((tab) => tab.active)?.id);
+    selectedIndex = getRowIndexForTabOrGroup(selectedTabId || visibleTabs.find((tab) => tab.active)?.id);
     applyRowState("center");
     searchInput.focus();
   } catch (error) {
@@ -814,7 +913,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   numericBookmarks = changes[NUMERIC_BOOKMARKS_KEY].newValue || {};
   refreshNumericBookmarkSlots();
   renderTabs();
-  selectedIndex = getRowIndexForTabId(selectedTabId);
+  selectedIndex = getRowIndexForTabOrGroup(selectedTabId);
   applyRowState();
 });
 
@@ -831,7 +930,7 @@ searchInput.addEventListener("input", () => {
   searchQuery = searchInput.value;
   refreshVisibleTabs();
   renderTabs({ scrollBlock: "center" });
-  selectedIndex = getRowIndexForTabId(selectedTabId);
+  selectedIndex = getRowIndexForTabOrGroup(selectedTabId);
   applyRowState("center");
 });
 
@@ -841,7 +940,7 @@ sortButtons.forEach((button) => {
     sortMode = button.dataset.sortMode || "window";
     refreshVisibleTabs();
     renderTabs();
-    selectedIndex = getRowIndexForTabId(selectedTabId);
+    selectedIndex = getRowIndexForTabOrGroup(selectedTabId);
     applyRowState();
     if (sortMode === "recent") {
       list.scrollTop = 0;
@@ -850,12 +949,12 @@ sortButtons.forEach((button) => {
 });
 
 list.addEventListener("dragover", (event) => {
-  if (sortMode !== "window" || draggedTabId === null || rows.length === 0) {
+  if (sortMode !== "window" || draggedTabId === null || tabRows.length === 0) {
     return;
   }
 
   event.preventDefault();
-  const lastRow = rows[rows.length - 1];
+  const lastRow = tabRows[tabRows.length - 1];
   const lastRect = lastRow.getBoundingClientRect();
   if (event.clientY > lastRect.bottom) {
     updateDropTarget(lastRow, "after");
@@ -955,6 +1054,24 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowUp") {
     event.preventDefault();
     selectRelative(-1);
+    return;
+  }
+
+  if (event.key === "ArrowLeft") {
+    const groupId = getSelectedGroupId();
+    if (groupId !== null) {
+      event.preventDefault();
+      void setGroupCollapsed(groupId, true).catch(reportActionError);
+    }
+    return;
+  }
+
+  if (event.key === "ArrowRight") {
+    const groupId = getSelectedGroupId();
+    if (groupId !== null) {
+      event.preventDefault();
+      void setGroupCollapsed(groupId, false).catch(reportActionError);
+    }
     return;
   }
 

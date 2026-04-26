@@ -36,6 +36,7 @@ const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
+const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
@@ -1432,6 +1433,25 @@ async function moveTabFromSwitcher(tabId, index, groupId, context = {}) {
   return collectTabSwitcherItems(targetTab.windowId);
 }
 
+async function setGroupCollapsedFromSwitcher(groupId, collapsed, context = {}) {
+  if (typeof groupId !== "number" || !Number.isInteger(groupId) || groupId < 0) {
+    throw new Error("Invalid group id");
+  }
+
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId !== "number") {
+    throw new Error("Invalid window id");
+  }
+
+  const group = await chrome.tabGroups.get(groupId);
+  if (group.windowId !== windowId) {
+    throw new Error("Cannot update a group outside the current window");
+  }
+
+  await chrome.tabGroups.update(groupId, { collapsed: Boolean(collapsed) });
+  return collectTabSwitcherItems(windowId);
+}
+
 async function getOrCreateBookmarkFolder() {
   const matches = await chrome.bookmarks.search({ title: BOOKMARK_FOLDER_TITLE });
   const existingFolder = matches.find((bookmark) => bookmark.title === BOOKMARK_FOLDER_TITLE && !bookmark.url);
@@ -1619,6 +1639,12 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
   scheduleSync("tab-activated");
 });
 
+if (chrome.tabGroups?.onUpdated) {
+  chrome.tabGroups.onUpdated.addListener((group) => {
+    notifyTabSwitcherRefresh(group?.windowId);
+  });
+}
+
 chrome.windows.onRemoved.addListener((windowId) => {
   if (windowId === tabSwitcherPopupWindowId) {
     tabSwitcherPopupWindowId = null;
@@ -1735,6 +1761,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach tab move failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === SET_GROUP_COLLAPSED_MESSAGE) {
+    void setGroupCollapsedFromSwitcher(message.groupId, message.collapsed, switcherContext)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach group collapse update failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

@@ -129,6 +129,8 @@ button {
   align-items: center;
   gap: 9px;
   padding: 18px 10px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   color: #e5e7eb;
   font-size: 13px;
   font-weight: 700;
@@ -138,6 +140,23 @@ button {
 
 .section-header:first-child {
   padding-top: 8px;
+}
+
+.section-header-collapsed {
+  min-height: 44px;
+  margin: 4px 0;
+  padding: 10px;
+  cursor: pointer;
+}
+
+body:not(.window-blurred) .section-header-collapsed:hover {
+  background: rgba(96, 165, 250, 0.14);
+  border-color: rgba(96, 165, 250, 0.34);
+}
+
+.section-header-collapsed[aria-selected="true"] {
+  background: rgba(129, 140, 248, 0.34);
+  border-color: rgba(199, 210, 254, 0.82);
 }
 
 .swatch {
