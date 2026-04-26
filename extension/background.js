@@ -38,7 +38,9 @@ const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
+const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
+const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
@@ -1802,6 +1804,37 @@ async function moveTabFromSwitcher(tabId, index, groupId, context = {}) {
   return collectTabSwitcherItems(targetTab.windowId);
 }
 
+async function createGroupFromSwitcher(tabId, title, context = {}) {
+  if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
+    throw new Error("Invalid tab id");
+  }
+
+  if (typeof title !== "string") {
+    throw new Error("Invalid group title");
+  }
+
+  const targetTab = await chrome.tabs.get(tabId);
+  assertTabInSwitcherWindow(targetTab, context, "group");
+
+  if (targetTab.pinned) {
+    throw new Error("Pinned tabs cannot be grouped; unpin this tab first");
+  }
+
+  const targetWindow = await chrome.windows.get(targetTab.windowId);
+  if (targetWindow.type !== "normal") {
+    throw new Error("Tab groups are only supported in normal browser windows");
+  }
+
+  const groupId = await chrome.tabs.group({
+    tabIds: [tabId],
+    createProperties: { windowId: targetTab.windowId }
+  });
+  await chrome.tabGroups.update(groupId, {
+    title: title.trim() || "New group"
+  });
+  return collectTabSwitcherItems(targetTab.windowId);
+}
+
 async function setGroupCollapsedFromSwitcher(groupId, collapsed, context = {}) {
   if (typeof groupId !== "number" || !Number.isInteger(groupId) || groupId < 0) {
     throw new Error("Invalid group id");
@@ -1818,6 +1851,29 @@ async function setGroupCollapsedFromSwitcher(groupId, collapsed, context = {}) {
   }
 
   await chrome.tabGroups.update(groupId, { collapsed: Boolean(collapsed) });
+  return collectTabSwitcherItems(windowId);
+}
+
+async function renameGroupFromSwitcher(groupId, title, context = {}) {
+  if (typeof groupId !== "number" || !Number.isInteger(groupId) || groupId < 0) {
+    throw new Error("Invalid group id");
+  }
+
+  if (typeof title !== "string") {
+    throw new Error("Invalid group title");
+  }
+
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId !== "number") {
+    throw new Error("Invalid window id");
+  }
+
+  const group = await chrome.tabGroups.get(groupId);
+  if (group.windowId !== windowId) {
+    throw new Error("Cannot rename a group outside the current window");
+  }
+
+  await chrome.tabGroups.update(groupId, { title: title.trim() });
   return collectTabSwitcherItems(windowId);
 }
 
@@ -2202,6 +2258,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === CREATE_GROUP_MESSAGE) {
+    void createGroupFromSwitcher(message.tabId, message.title, switcherContext)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach group create failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
   if (message?.type === SET_GROUP_COLLAPSED_MESSAGE) {
     void setGroupCollapsedFromSwitcher(message.groupId, message.collapsed, switcherContext)
       .then((tabs) => {
@@ -2209,6 +2278,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach group collapse update failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === RENAME_GROUP_MESSAGE) {
+    void renameGroupFromSwitcher(message.groupId, message.title, switcherContext)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach group rename failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

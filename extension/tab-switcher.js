@@ -8,7 +8,9 @@ const REFRESH_TAB_SWITCHER_MESSAGE = "tabcoach:refresh-tab-switcher";
 const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
+const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
+const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
@@ -51,6 +53,8 @@ const list = document.getElementById("list");
 const desktopApps = document.getElementById("desktopApps");
 const searchInput = document.getElementById("searchInput");
 const newTabButton = document.getElementById("newTabButton");
+const groupSelectedButton = document.getElementById("groupSelectedButton");
+const duplicateSelectedButton = document.getElementById("duplicateSelectedButton");
 const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
 
@@ -235,12 +239,40 @@ function updateSortButtons() {
   }
 }
 
+function getSelectedTab() {
+  const tabId = getSelectedTabId();
+  return typeof tabId === "number" ? tabs.find((tab) => tab.id === tabId) ?? null : null;
+}
+
+function getTabActionLabel(tab) {
+  return tab?.displayTitle || tab?.title || tab?.url || "selected tab";
+}
+
+function updateSelectedTabActionButtons() {
+  const selectedTab = getSelectedTab();
+  const hasSelectedTab = Boolean(selectedTab);
+
+  duplicateSelectedButton.disabled = !hasSelectedTab;
+  duplicateSelectedButton.title = hasSelectedTab ? `Duplicate ${getTabActionLabel(selectedTab)}` : "Select a tab to duplicate";
+  duplicateSelectedButton.setAttribute("aria-label", duplicateSelectedButton.title);
+
+  const canGroupSelectedTab = Boolean(selectedTab && !selectedTab.pinned);
+  groupSelectedButton.disabled = !canGroupSelectedTab;
+  groupSelectedButton.title = !hasSelectedTab
+    ? "Select a tab to create a group"
+    : selectedTab.pinned
+      ? "Unpin this tab before creating a group"
+      : `Create group for ${getTabActionLabel(selectedTab)}`;
+  groupSelectedButton.setAttribute("aria-label", groupSelectedButton.title);
+}
+
 function applyRowState(scrollBlock = "nearest") {
   rows.forEach((row, index) => {
     row.setAttribute("aria-selected", String(index === selectedIndex));
   });
 
   rows[selectedIndex]?.scrollIntoView({ block: scrollBlock });
+  updateSelectedTabActionButtons();
 }
 
 function selectRelative(offset) {
@@ -359,6 +391,59 @@ async function setGroupCollapsed(groupId, collapsed) {
   applyRowState();
 }
 
+async function renameGroup(groupId, currentTitle) {
+  if (typeof groupId !== "number") {
+    return;
+  }
+
+  const nextTitle = window.prompt("Rename tab group", currentTitle || "");
+  if (nextTitle === null) {
+    return;
+  }
+
+  const selectedTabId = getSelectedTabId();
+  const response = await sendMessage({ type: RENAME_GROUP_MESSAGE, groupId, title: nextTitle }).then((result) =>
+    assertResponse(result, "Group rename failed")
+  );
+  tabs = dedupeTabsById(response.tabs);
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabOrGroup(selectedTabId) || getRowIndexForGroupId(groupId);
+  applyRowState();
+}
+
+async function createGroupForTab(tabId, currentTitle = "") {
+  if (typeof tabId !== "number") {
+    return;
+  }
+
+  const selectedTabId = getSelectedTabId();
+  const nextTitle = window.prompt("Create tab group", currentTitle || "New group");
+  if (nextTitle === null) {
+    return;
+  }
+
+  const response = await sendMessage({ type: CREATE_GROUP_MESSAGE, tabId, title: nextTitle }).then((result) =>
+    assertResponse(result, "Group create failed")
+  );
+  tabs = dedupeTabsById(response.tabs);
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabId(selectedTabId || tabId);
+  applyRowState();
+}
+
+async function createGroupForSelectedTab() {
+  const tab = getSelectedTab();
+  if (!tab?.id || tab.pinned) {
+    return;
+  }
+
+  await createGroupForTab(tab.id, tab.group?.title || "");
+}
+
 function showShortcutNotification(message) {
   const hostId = "__tabcoach_shortcut_toast";
   const existingHost = document.getElementById(hostId);
@@ -441,6 +526,15 @@ async function duplicateTab(tabId) {
   );
   insertDuplicatedTab(tabId, response.tab);
   closeAfterSwitchIfNeeded();
+}
+
+async function duplicateSelectedTab() {
+  const tab = getSelectedTab();
+  if (!tab?.id) {
+    return;
+  }
+
+  await duplicateTab(tab.id);
 }
 
 async function assignNumericBookmark(slot) {
@@ -758,29 +852,43 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
           : "Ungrouped";
 
         sectionHeader.append(swatch, sectionTitle);
-        if (tab.group?.collapsed) {
-          sectionHeader.classList.add("section-header-collapsed");
+        if (tab.group) {
+          const renameButton = createButton(
+            "group-rename",
+            "✎",
+            `Rename ${tab.group.title || "Unnamed group"}`,
+            () => renameGroup(tab.group.id, tab.group.title || "")
+          );
+          sectionHeader.appendChild(renameButton);
+          sectionHeader.classList.add("section-header-clickable");
+          if (tab.group.collapsed) {
+            sectionHeader.classList.add("section-header-collapsed");
+          }
           sectionHeader.setAttribute("role", "option");
           sectionHeader.tabIndex = -1;
           sectionHeader.dataset.tabcoachGroupId = String(tab.group.id);
           const rowIndex = rows.length;
           sectionHeader.addEventListener("pointerdown", (event) => {
-            if (event.button !== 0) {
+            if (event.button !== 0 || (event.target instanceof HTMLElement && event.target.closest("button"))) {
               return;
             }
 
             selectedIndex = rowIndex;
             suppressNextRowClick = true;
-            void setGroupCollapsed(tab.group.id, false).catch(reportActionError);
+            void setGroupCollapsed(tab.group.id, !tab.group.collapsed).catch(reportActionError);
           });
-          sectionHeader.addEventListener("click", () => {
+          sectionHeader.addEventListener("click", (event) => {
+            if (event.target instanceof HTMLElement && event.target.closest("button")) {
+              return;
+            }
+
             if (suppressNextRowClick) {
               suppressNextRowClick = false;
               return;
             }
 
             selectedIndex = rowIndex;
-            void setGroupCollapsed(tab.group.id, false).catch(reportActionError);
+            void setGroupCollapsed(tab.group.id, !tab.group.collapsed).catch(reportActionError);
           });
           rows.push(sectionHeader);
         }
@@ -923,13 +1031,6 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     );
     bookmarkButton.dataset.bookmarked = String(Boolean(tab.bookmarked));
 
-    const duplicateButton = createButton(
-      "duplicate",
-      "+",
-      `Duplicate ${tab.displayTitle || tab.title || tab.url || "tab"}`,
-      () => duplicateTab(tab.id)
-    );
-
     const copyButton = createButton("copy", "⧉", `Copy URL for ${tab.displayTitle || tab.title || tab.url || "tab"}`, async (button) => {
       const copied = await copyTabUrl(tab.id);
       button.textContent = copied ? "✓" : "!";
@@ -944,7 +1045,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     const closeTabButton = createButton("close", "×", `Close ${tab.displayTitle || tab.title || tab.url || "tab"}`, () => closeTab(tab.id));
 
     text.append(tabTitle, tabUrl);
-    row.append(icon, text, status, bookmarkButton, duplicateButton, copyButton, closeTabButton);
+    row.append(icon, text, status, bookmarkButton, copyButton, closeTabButton);
     rows.push(row);
     tabRows.push(row);
     list.appendChild(row);
@@ -997,6 +1098,14 @@ closeButton.addEventListener("click", () => {
 
 newTabButton.addEventListener("click", () => {
   void createNewTab().catch(reportActionError);
+});
+
+groupSelectedButton.addEventListener("click", () => {
+  void createGroupForSelectedTab().catch(reportActionError);
+});
+
+duplicateSelectedButton.addEventListener("click", () => {
+  void duplicateSelectedTab().catch(reportActionError);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
