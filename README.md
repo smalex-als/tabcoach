@@ -88,13 +88,13 @@ The extension will:
 - show desktop app launcher buttons at the bottom of the `Command+E` popup; by default, the `iTerm` button asks the local server to run `open -a iTerm`
 - send selected page text to the local TTS flow; assign the `Speak selection` shortcut from `chrome://extensions/shortcuts`
 - show a badge and notification when TTS is started successfully
-- keep a per-window activation history and expose a `Previous tab` command that jumps back to the last active tab in the same window
+- keep a per-window activation history and expose previous/next history commands for jumping backward and forward between recently active tabs in the same window
 
 Extension settings are available from `chrome://extensions` -> `Tabcoach` -> `Details` -> `Extension options`.
 Settings include an option to open the `Command+E` tab switcher as a left-side window next to the current Chrome window. In left-side mode, selecting a tab keeps the switcher open while focus moves to the selected tab.
 
 The `Command+E` popup includes a `+` button that opens a new tab before the currently active tab in the source window. If the active tab is in a Chrome tab group, the new tab is added to the same group.
-The `Previous tab` shortcut defaults to `Ctrl+Q` (`Control+Q` on macOS) and can be changed from `chrome://extensions/shortcuts`.
+The `Previous tab` shortcut defaults to `Ctrl+Q` (`Control+Q` on macOS) and can be changed from `chrome://extensions/shortcuts`. The `Next tab in history` command is available there too; Chrome may not allow `Ctrl+W` because it normally closes the current tab.
 
 Auto-close rules:
 

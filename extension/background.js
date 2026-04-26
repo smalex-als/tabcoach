@@ -48,7 +48,9 @@ const BOOKMARK_FOLDER_TITLE = "Tabcoach";
 const ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX = "assign-numeric-bookmark-";
 const JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX = "jump-numeric-bookmark-";
 const PREVIOUS_TAB_COMMAND = "previous-tab";
+const NEXT_TAB_IN_HISTORY_COMMAND = "next-tab-in-history";
 const TAB_ACTIVATION_HISTORY_KEY = "tabActivationHistory";
+const TAB_FORWARD_HISTORY_KEY = "tabForwardHistory";
 const MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW = 25;
 
 const TRACKING_PARAMS = new Set([
@@ -82,6 +84,8 @@ let lastServerHealth = {
 };
 const recentTabCreations = new Map();
 const tabActivationHistoryByWindowId = new Map();
+const tabForwardHistoryByWindowId = new Map();
+const suppressedActivationHistoryByWindowId = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -201,15 +205,21 @@ function serializeTabActivationHistory() {
   );
 }
 
+function serializeTabForwardHistory() {
+  return Object.fromEntries(
+    [...tabForwardHistoryByWindowId.entries()].map(([windowId, tabIds]) => [String(windowId), tabIds])
+  );
+}
+
 async function saveTabActivationHistory() {
   await getTabHistoryStorageArea().set({
-    [TAB_ACTIVATION_HISTORY_KEY]: serializeTabActivationHistory()
+    [TAB_ACTIVATION_HISTORY_KEY]: serializeTabActivationHistory(),
+    [TAB_FORWARD_HISTORY_KEY]: serializeTabForwardHistory()
   });
 }
 
-function loadSerializedTabActivationHistory(rawHistory) {
-  tabActivationHistoryByWindowId.clear();
-
+function loadSerializedTabHistory(rawHistory, targetMap) {
+  targetMap.clear();
   if (typeof rawHistory !== "object" || rawHistory === null) {
     return;
   }
@@ -225,9 +235,17 @@ function loadSerializedTabActivationHistory(rawHistory) {
       .slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW);
 
     if (cleanTabIds.length > 0) {
-      tabActivationHistoryByWindowId.set(windowId, cleanTabIds);
+      targetMap.set(windowId, cleanTabIds);
     }
   }
+}
+
+function loadSerializedTabActivationHistory(rawHistory) {
+  loadSerializedTabHistory(rawHistory, tabActivationHistoryByWindowId);
+}
+
+function loadSerializedTabForwardHistory(rawHistory) {
+  loadSerializedTabHistory(rawHistory, tabForwardHistoryByWindowId);
 }
 
 async function seedActiveTabsInHistory() {
@@ -268,8 +286,12 @@ async function ensureTabActivationHistoryLoaded() {
 
   if (!tabActivationHistoryLoadPromise) {
     tabActivationHistoryLoadPromise = (async () => {
-      const stored = await getTabHistoryStorageArea().get({ [TAB_ACTIVATION_HISTORY_KEY]: {} });
+      const stored = await getTabHistoryStorageArea().get({
+        [TAB_ACTIVATION_HISTORY_KEY]: {},
+        [TAB_FORWARD_HISTORY_KEY]: {}
+      });
       loadSerializedTabActivationHistory(stored[TAB_ACTIVATION_HISTORY_KEY]);
+      loadSerializedTabForwardHistory(stored[TAB_FORWARD_HISTORY_KEY]);
       await seedActiveTabsInHistory();
       tabActivationHistoryLoaded = true;
     })().finally(() => {
@@ -298,12 +320,17 @@ async function isNormalBrowserTab(tab, windowId) {
   }
 }
 
-async function recordActivatedTab(tabId, windowId) {
+async function recordActivatedTab(tabId, windowId, { clearForwardHistory = true } = {}) {
   if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) {
     return;
   }
 
   await ensureTabActivationHistoryLoaded();
+
+  if (suppressedActivationHistoryByWindowId.get(windowId) === tabId) {
+    suppressedActivationHistoryByWindowId.delete(windowId);
+    return;
+  }
 
   let tab = null;
   try {
@@ -323,6 +350,10 @@ async function recordActivatedTab(tabId, windowId) {
     ...history.filter((historyTabId) => historyTabId !== tabId)
   ].slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW));
 
+  if (clearForwardHistory) {
+    tabForwardHistoryByWindowId.delete(windowId);
+  }
+
   await saveTabActivationHistory();
 }
 
@@ -339,15 +370,24 @@ async function removeTabFromActivationHistory(tabId, windowId = null) {
 
   for (const [historyWindowId, history] of entries) {
     const nextHistory = history.filter((historyTabId) => historyTabId !== tabId);
-    if (nextHistory.length === history.length) {
-      continue;
+    if (nextHistory.length !== history.length) {
+      changed = true;
+      if (nextHistory.length > 0) {
+        tabActivationHistoryByWindowId.set(historyWindowId, nextHistory);
+      } else {
+        tabActivationHistoryByWindowId.delete(historyWindowId);
+      }
     }
 
-    changed = true;
-    if (nextHistory.length > 0) {
-      tabActivationHistoryByWindowId.set(historyWindowId, nextHistory);
-    } else {
-      tabActivationHistoryByWindowId.delete(historyWindowId);
+    const forwardHistory = tabForwardHistoryByWindowId.get(historyWindowId) ?? [];
+    const nextForwardHistory = forwardHistory.filter((historyTabId) => historyTabId !== tabId);
+    if (nextForwardHistory.length !== forwardHistory.length) {
+      changed = true;
+      if (nextForwardHistory.length > 0) {
+        tabForwardHistoryByWindowId.set(historyWindowId, nextForwardHistory);
+      } else {
+        tabForwardHistoryByWindowId.delete(historyWindowId);
+      }
     }
   }
 
@@ -362,8 +402,13 @@ async function clearWindowActivationHistory(windowId) {
   }
 
   await ensureTabActivationHistoryLoaded();
+  suppressedActivationHistoryByWindowId.delete(windowId);
   if (!tabActivationHistoryByWindowId.delete(windowId)) {
-    return;
+    if (!tabForwardHistoryByWindowId.delete(windowId)) {
+      return;
+    }
+  } else {
+    tabForwardHistoryByWindowId.delete(windowId);
   }
 
   await saveTabActivationHistory();
@@ -1429,6 +1474,7 @@ async function logCommandShortcuts() {
   const trackedCommands = commands.filter(
     (command) =>
       command.name === PREVIOUS_TAB_COMMAND ||
+      command.name === NEXT_TAB_IN_HISTORY_COMMAND ||
       command.name?.startsWith(ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX) ||
       command.name?.startsWith(JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX)
   );
@@ -1584,49 +1630,138 @@ async function switchToTab(tabId, context = {}) {
   }
 }
 
+async function findValidHistoryTab(windowId, tabIds) {
+  const staleTabIds = [];
+
+  for (const tabId of tabIds) {
+    try {
+      const targetTab = await chrome.tabs.get(tabId);
+      if (targetTab.windowId !== windowId || isTabSwitcherUrl(targetTab.url)) {
+        staleTabIds.push(tabId);
+        continue;
+      }
+
+      return { targetTab, staleTabIds };
+    } catch (error) {
+      staleTabIds.push(tabId);
+      console.warn("Tabcoach history candidate skipped", error);
+    }
+  }
+
+  return { targetTab: null, staleTabIds };
+}
+
+function getCleanTabHistory(windowId, staleTabIds = []) {
+  const staleSet = new Set(staleTabIds);
+  return (tabActivationHistoryByWindowId.get(windowId) ?? []).filter((tabId) => !staleSet.has(tabId));
+}
+
+function getCleanForwardHistory(windowId, staleTabIds = []) {
+  const staleSet = new Set(staleTabIds);
+  return (tabForwardHistoryByWindowId.get(windowId) ?? []).filter((tabId) => !staleSet.has(tabId));
+}
+
+async function updateHistoryAfterBackNavigation(windowId, currentTabId, targetTabId, staleTabIds = []) {
+  const history = getCleanTabHistory(windowId, staleTabIds);
+  const forwardHistory = getCleanForwardHistory(windowId, staleTabIds);
+
+  tabActivationHistoryByWindowId.set(windowId, [
+    targetTabId,
+    ...history.filter((tabId) => tabId !== targetTabId && tabId !== currentTabId)
+  ].slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW));
+  tabForwardHistoryByWindowId.set(windowId, [
+    currentTabId,
+    ...forwardHistory.filter((tabId) => tabId !== currentTabId && tabId !== targetTabId)
+  ].slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW));
+  await saveTabActivationHistory();
+}
+
+async function updateHistoryAfterForwardNavigation(windowId, currentTabId, targetTabId, staleTabIds = []) {
+  const history = getCleanTabHistory(windowId, staleTabIds);
+  const forwardHistory = getCleanForwardHistory(windowId, staleTabIds);
+  const nextForwardHistory = forwardHistory.filter((tabId) => tabId !== targetTabId && tabId !== currentTabId);
+
+  tabActivationHistoryByWindowId.set(windowId, [
+    targetTabId,
+    currentTabId,
+    ...history.filter((tabId) => tabId !== targetTabId && tabId !== currentTabId)
+  ].slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW));
+
+  if (nextForwardHistory.length > 0) {
+    tabForwardHistoryByWindowId.set(windowId, nextForwardHistory.slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW));
+  } else {
+    tabForwardHistoryByWindowId.delete(windowId);
+  }
+
+  await saveTabActivationHistory();
+}
+
 async function switchToPreviousTab(commandTab = null) {
   const activeTab = await getFocusedActiveTab(commandTab);
   if (!activeTab || typeof activeTab.id !== "number" || typeof activeTab.windowId !== "number") {
     throw new Error("No active tab");
   }
 
-  await recordActivatedTab(activeTab.id, activeTab.windowId);
+  await recordActivatedTab(activeTab.id, activeTab.windowId, { clearForwardHistory: false });
   const history = tabActivationHistoryByWindowId.get(activeTab.windowId) ?? [];
-  const staleTabIds = [];
+  const candidates = history.filter((tabId) => tabId !== activeTab.id);
+  const { targetTab, staleTabIds } = await findValidHistoryTab(activeTab.windowId, candidates);
 
-  for (const tabId of history) {
-    if (tabId === activeTab.id) {
-      continue;
+  if (!targetTab || typeof targetTab.id !== "number") {
+    if (staleTabIds.length > 0) {
+      tabActivationHistoryByWindowId.set(activeTab.windowId, getCleanTabHistory(activeTab.windowId, staleTabIds));
+      tabForwardHistoryByWindowId.set(activeTab.windowId, getCleanForwardHistory(activeTab.windowId, staleTabIds));
+      await saveTabActivationHistory();
     }
-
-    try {
-      const targetTab = await chrome.tabs.get(tabId);
-      if (targetTab.windowId !== activeTab.windowId || isTabSwitcherUrl(targetTab.url)) {
-        staleTabIds.push(tabId);
-        continue;
-      }
-
-      await switchToTab(tabId, {
-        windowId: activeTab.windowId,
-        senderTab: activeTab,
-        source: "chrome-extension:previous-tab-command"
-      });
-      return;
-    } catch (error) {
-      staleTabIds.push(tabId);
-      console.warn("Tabcoach previous tab candidate skipped", error);
-    }
+    throw new Error("No previous tab in this window");
   }
 
-  if (staleTabIds.length > 0) {
-    tabActivationHistoryByWindowId.set(
-      activeTab.windowId,
-      history.filter((tabId) => !staleTabIds.includes(tabId))
-    );
-    await saveTabActivationHistory();
+  suppressedActivationHistoryByWindowId.set(activeTab.windowId, targetTab.id);
+  try {
+    await switchToTab(targetTab.id, {
+      windowId: activeTab.windowId,
+      senderTab: activeTab,
+      source: "chrome-extension:previous-tab-command"
+    });
+  } catch (error) {
+    suppressedActivationHistoryByWindowId.delete(activeTab.windowId);
+    throw error;
   }
 
-  throw new Error("No previous tab in this window");
+  await updateHistoryAfterBackNavigation(activeTab.windowId, activeTab.id, targetTab.id, staleTabIds);
+}
+
+async function switchToNextTabInHistory(commandTab = null) {
+  const activeTab = await getFocusedActiveTab(commandTab);
+  if (!activeTab || typeof activeTab.id !== "number" || typeof activeTab.windowId !== "number") {
+    throw new Error("No active tab");
+  }
+
+  await recordActivatedTab(activeTab.id, activeTab.windowId, { clearForwardHistory: false });
+  const forwardHistory = tabForwardHistoryByWindowId.get(activeTab.windowId) ?? [];
+  const { targetTab, staleTabIds } = await findValidHistoryTab(activeTab.windowId, forwardHistory);
+
+  if (!targetTab || typeof targetTab.id !== "number") {
+    if (staleTabIds.length > 0) {
+      tabForwardHistoryByWindowId.set(activeTab.windowId, getCleanForwardHistory(activeTab.windowId, staleTabIds));
+      await saveTabActivationHistory();
+    }
+    throw new Error("No next tab in this window");
+  }
+
+  suppressedActivationHistoryByWindowId.set(activeTab.windowId, targetTab.id);
+  try {
+    await switchToTab(targetTab.id, {
+      windowId: activeTab.windowId,
+      senderTab: activeTab,
+      source: "chrome-extension:next-tab-history-command"
+    });
+  } catch (error) {
+    suppressedActivationHistoryByWindowId.delete(activeTab.windowId);
+    throw error;
+  }
+
+  await updateHistoryAfterForwardNavigation(activeTab.windowId, activeTab.id, targetTab.id, staleTabIds);
 }
 
 async function closeTabFromSwitcher(tabId, context = {}) {
@@ -2133,6 +2268,13 @@ chrome.commands.onCommand.addListener((command, tab) => {
   if (command === PREVIOUS_TAB_COMMAND) {
     void switchToPreviousTab(tab).catch((error) => {
       console.error("Tabcoach previous tab failed", error);
+    });
+    return;
+  }
+
+  if (command === NEXT_TAB_IN_HISTORY_COMMAND) {
+    void switchToNextTabInHistory(tab).catch((error) => {
+      console.error("Tabcoach next tab in history failed", error);
     });
     return;
   }

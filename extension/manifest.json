@@ -29,6 +29,9 @@
       },
       "description": "Switch to the previously active tab in the current window"
     },
+    "next-tab-in-history": {
+      "description": "Switch forward in the tab activation history"
+    },
     "assign-numeric-bookmark-0": {
       "description": "Assign numeric bookmark 0 to the active tab"
     },
