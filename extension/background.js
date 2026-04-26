@@ -39,6 +39,7 @@ const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
 const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
+const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
@@ -1879,6 +1880,43 @@ async function createGroupFromSwitcher(tabId, title, context = {}) {
   return collectTabSwitcherItems(targetTab.windowId);
 }
 
+async function setTabGroupFromSwitcher(tabId, groupId, context = {}) {
+  if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
+    throw new Error("Invalid tab id");
+  }
+
+  const targetTab = await chrome.tabs.get(tabId);
+  assertTabInSwitcherWindow(targetTab, context, "move to group");
+
+  if (groupId === null || groupId === -1) {
+    if (typeof targetTab.groupId === "number" && targetTab.groupId >= 0) {
+      await chrome.tabs.ungroup(tabId);
+    }
+    return collectTabSwitcherItems(targetTab.windowId);
+  }
+
+  if (typeof groupId !== "number" || !Number.isInteger(groupId) || groupId < 0) {
+    throw new Error("Invalid group id");
+  }
+
+  if (targetTab.pinned) {
+    throw new Error("Pinned tabs cannot be moved to groups; unpin this tab first");
+  }
+
+  const targetWindow = await chrome.windows.get(targetTab.windowId);
+  if (targetWindow.type !== "normal") {
+    throw new Error("Tab groups are only supported in normal browser windows");
+  }
+
+  const targetGroup = await chrome.tabGroups.get(groupId);
+  if (targetGroup.windowId !== targetTab.windowId) {
+    throw new Error("Cannot move a tab into a group outside the current window");
+  }
+
+  await chrome.tabs.group({ groupId, tabIds: [tabId] });
+  return collectTabSwitcherItems(targetTab.windowId);
+}
+
 async function setGroupCollapsedFromSwitcher(groupId, collapsed, context = {}) {
   if (typeof groupId !== "number" || !Number.isInteger(groupId) || groupId < 0) {
     throw new Error("Invalid group id");
@@ -2309,6 +2347,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach group create failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === SET_TAB_GROUP_MESSAGE) {
+    void setTabGroupFromSwitcher(message.tabId, message.groupId, switcherContext)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach tab group move failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

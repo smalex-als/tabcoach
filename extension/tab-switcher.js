@@ -9,6 +9,7 @@ const SWITCH_TAB_MESSAGE = "tabcoach:switch-tab";
 const CLOSE_TAB_MESSAGE = "tabcoach:close-tab";
 const MOVE_TAB_MESSAGE = "tabcoach:move-tab";
 const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
+const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
@@ -54,6 +55,7 @@ const desktopApps = document.getElementById("desktopApps");
 const searchInput = document.getElementById("searchInput");
 const newTabButton = document.getElementById("newTabButton");
 const groupSelectedButton = document.getElementById("groupSelectedButton");
+const moveGroupSelectedButton = document.getElementById("moveGroupSelectedButton");
 const duplicateSelectedButton = document.getElementById("duplicateSelectedButton");
 const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
@@ -248,22 +250,54 @@ function getTabActionLabel(tab) {
   return tab?.displayTitle || tab?.title || tab?.url || "selected tab";
 }
 
+function getAvailableGroups() {
+  const groupsById = new Map();
+
+  tabs.forEach((tab) => {
+    if (tab.group?.id !== undefined && !groupsById.has(tab.group.id)) {
+      groupsById.set(tab.group.id, tab.group);
+    }
+  });
+
+  return [...groupsById.values()].sort((left, right) =>
+    (left.title || "Unnamed group").localeCompare(right.title || "Unnamed group")
+  );
+}
+
 function updateSelectedTabActionButtons() {
   const selectedTab = getSelectedTab();
   const hasSelectedTab = Boolean(selectedTab);
+  const availableGroups = getAvailableGroups();
 
   duplicateSelectedButton.disabled = !hasSelectedTab;
-  duplicateSelectedButton.title = hasSelectedTab ? `Duplicate ${getTabActionLabel(selectedTab)}` : "Select a tab to duplicate";
+  duplicateSelectedButton.title = hasSelectedTab
+    ? `Duplicate selected tab: ${getTabActionLabel(selectedTab)}`
+    : "Select a tab first to duplicate it";
   duplicateSelectedButton.setAttribute("aria-label", duplicateSelectedButton.title);
 
   const canGroupSelectedTab = Boolean(selectedTab && !selectedTab.pinned);
   groupSelectedButton.disabled = !canGroupSelectedTab;
   groupSelectedButton.title = !hasSelectedTab
-    ? "Select a tab to create a group"
+    ? "Select a tab first to create a new group"
     : selectedTab.pinned
-      ? "Unpin this tab before creating a group"
-      : `Create group for ${getTabActionLabel(selectedTab)}`;
+      ? "Unpin the selected tab before creating a group"
+      : `Create a new group from selected tab: ${getTabActionLabel(selectedTab)}`;
   groupSelectedButton.setAttribute("aria-label", groupSelectedButton.title);
+
+  const canMoveSelectedTabToGroup = Boolean(
+    selectedTab &&
+      !selectedTab.pinned &&
+      (availableGroups.some((group) => group.id !== selectedTab.group?.id) || selectedTab.group)
+  );
+  moveGroupSelectedButton.disabled = !canMoveSelectedTabToGroup;
+  moveGroupSelectedButton.title = !hasSelectedTab
+    ? "Select a tab first to move it to a group"
+    : selectedTab.pinned
+      ? "Unpin the selected tab before moving it to a group"
+      : canMoveSelectedTabToGroup
+        ? `Move selected tab to another group: ${getTabActionLabel(selectedTab)}`
+        : "No other groups are available for the selected tab";
+  moveGroupSelectedButton.setAttribute("aria-label", moveGroupSelectedButton.title);
 }
 
 function applyRowState(scrollBlock = "nearest") {
@@ -442,6 +476,57 @@ async function createGroupForSelectedTab() {
   }
 
   await createGroupForTab(tab.id, tab.group?.title || "");
+}
+
+async function moveSelectedTabToGroup() {
+  const tab = getSelectedTab();
+  if (!tab?.id || tab.pinned) {
+    return;
+  }
+
+  const groups = getAvailableGroups();
+  const options = [];
+
+  if (tab.group) {
+    options.push({ groupId: -1, label: "Ungroup" });
+  }
+
+  groups
+    .filter((group) => group.id !== tab.group?.id)
+    .forEach((group) => {
+      options.push({
+        groupId: group.id,
+        label: group.title || "Unnamed group"
+      });
+    });
+
+  if (options.length === 0) {
+    showShortcutNotification("No groups available");
+    return;
+  }
+
+  const menuText = options.map((option, index) => `${index + 1}. ${option.label}`).join("\n");
+  const rawChoice = window.prompt(`Move selected tab to:\n${menuText}`, "1");
+  if (rawChoice === null) {
+    return;
+  }
+
+  const option = options[Number(rawChoice.trim()) - 1];
+  if (!option) {
+    showShortcutNotification("Invalid group choice");
+    return;
+  }
+
+  const selectedTabId = tab.id;
+  const response = await sendMessage({ type: SET_TAB_GROUP_MESSAGE, tabId: tab.id, groupId: option.groupId }).then((result) =>
+    assertResponse(result, "Tab group move failed")
+  );
+  tabs = dedupeTabsById(response.tabs);
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabOrGroup(selectedTabId);
+  applyRowState();
 }
 
 function showShortcutNotification(message) {
@@ -707,6 +792,7 @@ function renderDesktopApps(apps) {
     button.className = "desktop-app-button";
     button.textContent = app.label;
     button.title = `Open ${app.label}`;
+    button.setAttribute("aria-label", `Open ${app.label}`);
     button.addEventListener("click", () => {
       void launchDesktopApp(app, button);
     });
@@ -795,6 +881,7 @@ function createButton(className, text, label, onClick) {
   button.type = "button";
   button.className = `icon-button ${className}`;
   button.textContent = text;
+  button.title = label;
   button.setAttribute("aria-label", label);
   button.addEventListener("click", (event) => {
     event.preventDefault();
@@ -1104,6 +1191,10 @@ newTabButton.addEventListener("click", () => {
 
 groupSelectedButton.addEventListener("click", () => {
   void createGroupForSelectedTab().catch(reportActionError);
+});
+
+moveGroupSelectedButton.addEventListener("click", () => {
+  void moveSelectedTabToGroup().catch(reportActionError);
 });
 
 duplicateSelectedButton.addEventListener("click", () => {
