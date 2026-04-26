@@ -282,7 +282,7 @@ function getRowIndexForTabOrGroup(tabId) {
 }
 
 function getNumericShortcutSlot(event) {
-  const match = event.code.match(/^Digit([1-9])$/);
+  const match = event.code.match(/^Digit([0-9])$/);
   return match ? match[1] : null;
 }
 
@@ -1086,7 +1086,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   const slot = String(message.slot);
-  if (!/^[1-9]$/.test(slot)) {
+  if (!/^[0-9]$/.test(slot)) {
     sendResponse({ ok: false, error: "Invalid numeric bookmark slot" });
     return true;
   }

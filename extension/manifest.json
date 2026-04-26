@@ -20,11 +20,20 @@
       "description": "Show tabs in the current window"
     },
     "speak-selection": {
-      "suggested_key": {
-        "default": "Ctrl+Shift+S",
-        "mac": "Command+Shift+S"
-      },
       "description": "Send selected text to Tabcoach TTS"
+    },
+    "previous-tab": {
+      "suggested_key": {
+        "default": "Ctrl+Q",
+        "mac": "MacCtrl+Q"
+      },
+      "description": "Switch to the previously active tab in the current window"
+    },
+    "assign-numeric-bookmark-0": {
+      "description": "Assign numeric bookmark 0 to the active tab"
+    },
+    "jump-numeric-bookmark-0": {
+      "description": "Jump to numeric bookmark 0"
     },
     "assign-numeric-bookmark-1": {
       "suggested_key": {
@@ -63,6 +72,30 @@
     },
     "jump-numeric-bookmark-5": {
       "description": "Jump to numeric bookmark 5"
+    },
+    "assign-numeric-bookmark-6": {
+      "description": "Assign numeric bookmark 6 to the active tab"
+    },
+    "jump-numeric-bookmark-6": {
+      "description": "Jump to numeric bookmark 6"
+    },
+    "assign-numeric-bookmark-7": {
+      "description": "Assign numeric bookmark 7 to the active tab"
+    },
+    "jump-numeric-bookmark-7": {
+      "description": "Jump to numeric bookmark 7"
+    },
+    "assign-numeric-bookmark-8": {
+      "description": "Assign numeric bookmark 8 to the active tab"
+    },
+    "jump-numeric-bookmark-8": {
+      "description": "Jump to numeric bookmark 8"
+    },
+    "assign-numeric-bookmark-9": {
+      "description": "Assign numeric bookmark 9 to the active tab"
+    },
+    "jump-numeric-bookmark-9": {
+      "description": "Jump to numeric bookmark 9"
     }
   },
   "action": {

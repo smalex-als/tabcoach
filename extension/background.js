@@ -47,6 +47,9 @@ const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
 const ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX = "assign-numeric-bookmark-";
 const JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX = "jump-numeric-bookmark-";
+const PREVIOUS_TAB_COMMAND = "previous-tab";
+const TAB_ACTIVATION_HISTORY_KEY = "tabActivationHistory";
+const MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW = 25;
 
 const TRACKING_PARAMS = new Set([
   "fbclid",
@@ -69,6 +72,8 @@ let badgeResetTimer = null;
 let tabSwitcherPopupWindowId = null;
 let tabSwitcherSourceWindowId = null;
 let settingsCache = null;
+let tabActivationHistoryLoaded = false;
+let tabActivationHistoryLoadPromise = null;
 let lastServerHealth = {
   ok: null,
   checkedAt: null,
@@ -76,6 +81,7 @@ let lastServerHealth = {
   badgeText: ""
 };
 const recentTabCreations = new Map();
+const tabActivationHistoryByWindowId = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -183,6 +189,184 @@ async function fetchLocalServer(label, endpoint, options = {}, settings = null) 
 
 function getErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function getTabHistoryStorageArea() {
+  return chrome.storage.session ?? chrome.storage.local;
+}
+
+function serializeTabActivationHistory() {
+  return Object.fromEntries(
+    [...tabActivationHistoryByWindowId.entries()].map(([windowId, tabIds]) => [String(windowId), tabIds])
+  );
+}
+
+async function saveTabActivationHistory() {
+  await getTabHistoryStorageArea().set({
+    [TAB_ACTIVATION_HISTORY_KEY]: serializeTabActivationHistory()
+  });
+}
+
+function loadSerializedTabActivationHistory(rawHistory) {
+  tabActivationHistoryByWindowId.clear();
+
+  if (typeof rawHistory !== "object" || rawHistory === null) {
+    return;
+  }
+
+  for (const [windowIdText, tabIds] of Object.entries(rawHistory)) {
+    const windowId = Number(windowIdText);
+    if (!Number.isInteger(windowId) || !Array.isArray(tabIds)) {
+      continue;
+    }
+
+    const cleanTabIds = tabIds
+      .filter((tabId) => Number.isInteger(tabId))
+      .slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW);
+
+    if (cleanTabIds.length > 0) {
+      tabActivationHistoryByWindowId.set(windowId, cleanTabIds);
+    }
+  }
+}
+
+async function seedActiveTabsInHistory() {
+  const windows = await chrome.windows.getAll({ populate: true, windowTypes: ["normal"] });
+  let changed = false;
+
+  for (const window of windows) {
+    if (typeof window.id !== "number") {
+      continue;
+    }
+
+    const activeTab = window.tabs?.find((tab) => tab.active && typeof tab.id === "number" && !isTabSwitcherUrl(tab.url));
+    if (!activeTab) {
+      continue;
+    }
+
+    const history = tabActivationHistoryByWindowId.get(window.id) ?? [];
+    if (history[0] === activeTab.id) {
+      continue;
+    }
+
+    tabActivationHistoryByWindowId.set(window.id, [
+      activeTab.id,
+      ...history.filter((tabId) => tabId !== activeTab.id)
+    ].slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW));
+    changed = true;
+  }
+
+  if (changed) {
+    await saveTabActivationHistory();
+  }
+}
+
+async function ensureTabActivationHistoryLoaded() {
+  if (tabActivationHistoryLoaded) {
+    return;
+  }
+
+  if (!tabActivationHistoryLoadPromise) {
+    tabActivationHistoryLoadPromise = (async () => {
+      const stored = await getTabHistoryStorageArea().get({ [TAB_ACTIVATION_HISTORY_KEY]: {} });
+      loadSerializedTabActivationHistory(stored[TAB_ACTIVATION_HISTORY_KEY]);
+      await seedActiveTabsInHistory();
+      tabActivationHistoryLoaded = true;
+    })().finally(() => {
+      tabActivationHistoryLoadPromise = null;
+    });
+  }
+
+  await tabActivationHistoryLoadPromise;
+}
+
+async function isNormalBrowserTab(tab, windowId) {
+  if (!tab || typeof tab.id !== "number" || typeof windowId !== "number") {
+    return false;
+  }
+
+  if (windowId === tabSwitcherPopupWindowId || isTabSwitcherUrl(tab.url)) {
+    return false;
+  }
+
+  try {
+    const window = await chrome.windows.get(windowId);
+    return window?.type === "normal";
+  } catch (error) {
+    console.warn("Tabcoach window lookup failed during history update", error);
+    return false;
+  }
+}
+
+async function recordActivatedTab(tabId, windowId) {
+  if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) {
+    return;
+  }
+
+  await ensureTabActivationHistoryLoaded();
+
+  let tab = null;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (error) {
+    console.warn("Tabcoach activated tab lookup failed", error);
+    return;
+  }
+
+  if (!(await isNormalBrowserTab(tab, windowId))) {
+    return;
+  }
+
+  const history = tabActivationHistoryByWindowId.get(windowId) ?? [];
+  tabActivationHistoryByWindowId.set(windowId, [
+    tabId,
+    ...history.filter((historyTabId) => historyTabId !== tabId)
+  ].slice(0, MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW));
+
+  await saveTabActivationHistory();
+}
+
+async function removeTabFromActivationHistory(tabId, windowId = null) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+
+  await ensureTabActivationHistoryLoaded();
+  let changed = false;
+  const entries = Number.isInteger(windowId)
+    ? [[windowId, tabActivationHistoryByWindowId.get(windowId) ?? []]]
+    : [...tabActivationHistoryByWindowId.entries()];
+
+  for (const [historyWindowId, history] of entries) {
+    const nextHistory = history.filter((historyTabId) => historyTabId !== tabId);
+    if (nextHistory.length === history.length) {
+      continue;
+    }
+
+    changed = true;
+    if (nextHistory.length > 0) {
+      tabActivationHistoryByWindowId.set(historyWindowId, nextHistory);
+    } else {
+      tabActivationHistoryByWindowId.delete(historyWindowId);
+    }
+  }
+
+  if (changed) {
+    await saveTabActivationHistory();
+  }
+}
+
+async function clearWindowActivationHistory(windowId) {
+  if (!Number.isInteger(windowId)) {
+    return;
+  }
+
+  await ensureTabActivationHistoryLoaded();
+  if (!tabActivationHistoryByWindowId.delete(windowId)) {
+    return;
+  }
+
+  await saveTabActivationHistory();
 }
 
 async function setServerHealth(ok, message, badgeText = "") {
@@ -1044,7 +1228,7 @@ function getNumericBookmarkCommandSlot(command, prefix) {
   }
 
   const slot = Number(command.slice(prefix.length));
-  if (!Number.isInteger(slot) || slot < 1 || slot > 9) {
+  if (!Number.isInteger(slot) || slot < 0 || slot > 9) {
     return null;
   }
 
@@ -1242,28 +1426,29 @@ async function logCommandShortcuts() {
   }
 
   const commands = await chrome.commands.getAll();
-  const numericBookmarkCommands = commands.filter(
+  const trackedCommands = commands.filter(
     (command) =>
+      command.name === PREVIOUS_TAB_COMMAND ||
       command.name?.startsWith(ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX) ||
       command.name?.startsWith(JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX)
   );
 
-  if (numericBookmarkCommands.length === 0) {
+  if (trackedCommands.length === 0) {
     return;
   }
 
   console.info(
-    "Tabcoach numeric bookmark shortcuts",
-    numericBookmarkCommands.map((command) => ({
+    "Tabcoach command shortcuts",
+    trackedCommands.map((command) => ({
       name: command.name,
       shortcut: command.shortcut || ""
     }))
   );
 
-  const unassignedCommands = numericBookmarkCommands.filter((command) => !command.shortcut);
+  const unassignedCommands = trackedCommands.filter((command) => !command.shortcut);
   if (unassignedCommands.length > 0) {
     console.warn(
-      "Tabcoach numeric bookmark shortcuts are unassigned; set them in chrome://extensions/shortcuts",
+      "Tabcoach command shortcuts are unassigned; set them in chrome://extensions/shortcuts",
       unassignedCommands.map((command) => command.name)
     );
   }
@@ -1385,7 +1570,7 @@ async function switchToTab(tabId, context = {}) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      source: "chrome-extension:tab-switcher",
+      source: context.source ?? "chrome-extension:tab-switcher",
       switchedAt: new Date().toISOString(),
       from: fromTab ? normalizeTab(fromTab) : null,
       to: normalizeTab(targetTab)
@@ -1397,6 +1582,51 @@ async function switchToTab(tabId, context = {}) {
   if (typeof targetTab.windowId === "number") {
     await chrome.windows.update(targetTab.windowId, { focused: true });
   }
+}
+
+async function switchToPreviousTab(commandTab = null) {
+  const activeTab = await getFocusedActiveTab(commandTab);
+  if (!activeTab || typeof activeTab.id !== "number" || typeof activeTab.windowId !== "number") {
+    throw new Error("No active tab");
+  }
+
+  await recordActivatedTab(activeTab.id, activeTab.windowId);
+  const history = tabActivationHistoryByWindowId.get(activeTab.windowId) ?? [];
+  const staleTabIds = [];
+
+  for (const tabId of history) {
+    if (tabId === activeTab.id) {
+      continue;
+    }
+
+    try {
+      const targetTab = await chrome.tabs.get(tabId);
+      if (targetTab.windowId !== activeTab.windowId || isTabSwitcherUrl(targetTab.url)) {
+        staleTabIds.push(tabId);
+        continue;
+      }
+
+      await switchToTab(tabId, {
+        windowId: activeTab.windowId,
+        senderTab: activeTab,
+        source: "chrome-extension:previous-tab-command"
+      });
+      return;
+    } catch (error) {
+      staleTabIds.push(tabId);
+      console.warn("Tabcoach previous tab candidate skipped", error);
+    }
+  }
+
+  if (staleTabIds.length > 0) {
+    tabActivationHistoryByWindowId.set(
+      activeTab.windowId,
+      history.filter((tabId) => !staleTabIds.includes(tabId))
+    );
+    await saveTabActivationHistory();
+  }
+
+  throw new Error("No previous tab in this window");
 }
 
 async function closeTabFromSwitcher(tabId, context = {}) {
@@ -1666,12 +1896,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   if (typeof tabId === "number") {
     recentTabCreations.delete(tabId);
+    void removeTabFromActivationHistory(tabId, removeInfo?.windowId);
   }
   notifyTabSwitcherRefresh(removeInfo?.windowId);
   scheduleSync("tab-removed");
 });
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
+  void recordActivatedTab(activeInfo?.tabId, activeInfo?.windowId).catch((error) => {
+    console.warn("Tabcoach tab activation history update failed", error);
+  });
   notifyTabSwitcherRefresh(activeInfo?.windowId);
   scheduleSync("tab-activated");
 });
@@ -1687,6 +1921,9 @@ chrome.windows.onRemoved.addListener((windowId) => {
     tabSwitcherPopupWindowId = null;
     tabSwitcherSourceWindowId = null;
   }
+  void clearWindowActivationHistory(windowId).catch((error) => {
+    console.warn("Tabcoach window activation history cleanup failed", error);
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -1889,6 +2126,13 @@ chrome.commands.onCommand.addListener((command, tab) => {
   if (command === "speak-selection") {
     void sendSelectionToTts().catch((error) => {
       console.error("Tabcoach TTS selection failed", error);
+    });
+    return;
+  }
+
+  if (command === PREVIOUS_TAB_COMMAND) {
+    void switchToPreviousTab(tab).catch((error) => {
+      console.error("Tabcoach previous tab failed", error);
     });
     return;
   }
