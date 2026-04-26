@@ -382,9 +382,19 @@ body:not(.window-blurred) .row:hover {
 }
 
 .icon-button.bookmark,
+.icon-button.group-snapshot,
+.icon-button.group-snapshot-open,
 .icon-button.group-rename,
 .icon-button.close {
   font-size: 22px;
+}
+
+.icon-button.group-snapshot {
+  color: #d1d5db;
+}
+
+.icon-button.group-snapshot[data-snapshot-exists="true"] {
+  color: #facc15;
 }
 
 .icon-button:hover {

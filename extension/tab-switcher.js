@@ -12,6 +12,8 @@ const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
 const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
+const BOOKMARK_GROUP_SNAPSHOT_MESSAGE = "tabcoach:bookmark-group-snapshot";
+const OPEN_GROUP_SNAPSHOT_BOOKMARKS_MESSAGE = "tabcoach:open-group-snapshot-bookmarks";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
@@ -445,6 +447,31 @@ async function renameGroup(groupId, currentTitle) {
   renderTabs();
   selectedIndex = getRowIndexForTabOrGroup(selectedTabId) || getRowIndexForGroupId(groupId);
   applyRowState();
+}
+
+async function bookmarkGroupSnapshot(groupId, button = null) {
+  if (typeof groupId !== "number") {
+    return;
+  }
+
+  const response = await sendMessage({ type: BOOKMARK_GROUP_SNAPSHOT_MESSAGE, groupId }).then((result) =>
+    assertResponse(result, "Group snapshot failed")
+  );
+  if (button) {
+    button.textContent = "★";
+    button.dataset.snapshotExists = "true";
+  }
+  showShortcutNotification(`Saved ${response.snapshot?.createdCount ?? 0} new tabs`);
+}
+
+async function openGroupSnapshotBookmarks(groupId) {
+  if (typeof groupId !== "number") {
+    return;
+  }
+
+  await sendMessage({ type: OPEN_GROUP_SNAPSHOT_BOOKMARKS_MESSAGE, groupId }).then((result) =>
+    assertResponse(result, "Open group bookmarks failed")
+  );
 }
 
 async function createGroupForTab(tabId, currentTitle = "") {
@@ -942,13 +969,26 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
 
         sectionHeader.append(swatch, sectionTitle);
         if (tab.group) {
+          const snapshotButton = createButton(
+            "group-snapshot",
+            tab.group.snapshotExists ? "★" : "☆",
+            `Bookmark snapshot of ${tab.group.title || "Unnamed group"}`,
+            (button) => bookmarkGroupSnapshot(tab.group.id, button)
+          );
+          snapshotButton.dataset.snapshotExists = String(Boolean(tab.group.snapshotExists));
+          const openSnapshotButton = createButton(
+            "group-snapshot-open",
+            "↗",
+            `Open today's bookmark snapshot for ${tab.group.title || "Unnamed group"}`,
+            () => openGroupSnapshotBookmarks(tab.group.id)
+          );
           const renameButton = createButton(
             "group-rename",
             "✎",
             `Rename ${tab.group.title || "Unnamed group"}`,
             () => renameGroup(tab.group.id, tab.group.title || "")
           );
-          sectionHeader.appendChild(renameButton);
+          sectionHeader.append(snapshotButton, openSnapshotButton, renameButton);
           sectionHeader.classList.add("section-header-clickable");
           if (tab.group.collapsed) {
             sectionHeader.classList.add("section-header-collapsed");

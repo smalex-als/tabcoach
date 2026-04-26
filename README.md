@@ -85,6 +85,7 @@ The extension will:
 - show, create, drag-reorder, group, bookmark, copy URLs, close, and switch between tabs in the current window with `Command+E` on macOS, including inline duplicate indicators, tab group labels, search, and recently visited sorting
 - use toolbar actions in the `Command+E` popup to create a group, move to a group, ungroup, or duplicate the currently selected tab
 - collapse, expand, and rename tab groups directly from the `Command+E` popup
+- save a tab group as a dated bookmark snapshot without deduplicating URLs, then open that snapshot in Chrome Bookmark Manager
 - assign numeric tab bookmark 1 from any page with `Ctrl+Shift+1` (`Control+Shift+1` on macOS), then jump with `Ctrl+1`; slots 0 through 9 are available as extension commands and can be assigned in `chrome://extensions/shortcuts`; saved numeric bookmarks show a small in-page notification; the `Command+E` popup supports slots 0 through 9
 - store bookmarks under `Tabcoach/<tab group name>` to keep saved tabs organized
 - show desktop app launcher buttons at the bottom of the `Command+E` popup; by default, the `iTerm` button asks the local server to run `open -a iTerm`
