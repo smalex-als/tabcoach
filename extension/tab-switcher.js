@@ -12,6 +12,8 @@ const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
+const GET_DESKTOP_APPS_MESSAGE = "tabcoach:get-desktop-apps";
+const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
 const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCHER_OPEN_LEFT_KEY = "switcherOpenLeft";
 
@@ -26,6 +28,7 @@ const groupColors = {
   cyan: "#22d3ee",
   orange: "#fb923c"
 };
+const FALLBACK_DESKTOP_APPS = [{ id: "iterm", label: "iTerm" }];
 const TRACKING_PARAMS = new Set([
   "fbclid",
   "gclid",
@@ -45,6 +48,7 @@ const TRACKING_PARAMS = new Set([
 const params = new URLSearchParams(window.location.search);
 const windowId = Number(params.get("windowId"));
 const list = document.getElementById("list");
+const desktopApps = document.getElementById("desktopApps");
 const searchInput = document.getElementById("searchInput");
 const newTabButton = document.getElementById("newTabButton");
 const closeButton = document.getElementById("closeButton");
@@ -537,6 +541,97 @@ function logCopyTabUrl(tab, copied) {
   }).catch((error) => {
     console.warn("Tabcoach tab event log failed", error);
   });
+}
+
+function setDesktopAppStatus(message, tone = "muted") {
+  let status = desktopApps.querySelector(".desktop-app-status");
+  if (!message) {
+    status?.remove();
+    return;
+  }
+
+  if (!status) {
+    status = document.createElement("div");
+    status.className = "desktop-app-status";
+    status.setAttribute("role", "status");
+    desktopApps.appendChild(status);
+  }
+
+  status.dataset.tone = tone;
+  status.textContent = message;
+}
+
+function getSafeDesktopApps(apps) {
+  return Array.isArray(apps)
+    ? apps
+        .filter((app) => typeof app?.id === "string" && app.id.length > 0 && typeof app?.label === "string" && app.label.length > 0)
+        .map((app) => ({ id: app.id, label: app.label }))
+    : [];
+}
+
+async function launchDesktopApp(app, button) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "...";
+  setDesktopAppStatus("");
+
+  try {
+    await sendMessage({ type: LAUNCH_DESKTOP_APP_MESSAGE, appId: app.id }).then((response) =>
+      assertResponse(response, `Could not open ${app.label}`)
+    );
+    button.textContent = "✓";
+    setTimeout(() => {
+      button.disabled = false;
+      button.textContent = originalText;
+    }, 700);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = originalText;
+    console.error("Tabcoach desktop app launch failed", error);
+    setDesktopAppStatus(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+function renderDesktopApps(apps) {
+  desktopApps.replaceChildren();
+  const safeApps = getSafeDesktopApps(apps);
+
+  if (safeApps.length === 0) {
+    desktopApps.hidden = true;
+    return;
+  }
+
+  desktopApps.hidden = false;
+  const appButtons = document.createElement("div");
+  appButtons.className = "desktop-app-buttons";
+
+  safeApps.forEach((app) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "desktop-app-button";
+    button.textContent = app.label;
+    button.title = `Open ${app.label}`;
+    button.addEventListener("click", () => {
+      void launchDesktopApp(app, button);
+    });
+    appButtons.appendChild(button);
+  });
+
+  desktopApps.appendChild(appButtons);
+}
+
+async function loadDesktopApps() {
+  renderDesktopApps(FALLBACK_DESKTOP_APPS);
+
+  try {
+    const response = await sendMessage({ type: GET_DESKTOP_APPS_MESSAGE }).then((result) =>
+      assertResponse(result, "Could not load desktop apps")
+    );
+    renderDesktopApps(response.apps);
+  } catch (error) {
+    console.warn("Tabcoach desktop app list failed", error);
+    setDesktopAppStatus(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 function clearDropTarget() {
@@ -1081,4 +1176,5 @@ document.addEventListener("keydown", (event) => {
   }
 }, { capture: true });
 
+void loadDesktopApps();
 void loadTabs();

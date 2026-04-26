@@ -11,6 +11,8 @@ const SYNC_ENDPOINT = "/api/sync";
 const TTS_SELECTION_ENDPOINT = "/api/tts-selection";
 const TAB_SWITCH_LOG_ENDPOINT = "/api/tab-switch";
 const TAB_EVENT_LOG_ENDPOINT = "/api/tab-event";
+const DESKTOP_APPS_ENDPOINT = "/api/desktop-apps";
+const DESKTOP_APP_LAUNCH_ENDPOINT = "/api/desktop-apps/launch";
 const SYNC_ALARM = "tabcoach-sync";
 const SYNC_DEBOUNCE_MS = 1500;
 const DEFAULT_SWITCHER_POPUP_WIDTH = 940;
@@ -40,6 +42,8 @@ const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
+const GET_DESKTOP_APPS_MESSAGE = "tabcoach:get-desktop-apps";
+const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
 const ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX = "assign-numeric-bookmark-";
 const JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX = "jump-numeric-bookmark-";
@@ -1546,6 +1550,39 @@ async function logTabEventFromSwitcher(payload) {
   }
 }
 
+async function getDesktopAppsFromServer() {
+  const response = await fetchLocalServer("desktop-apps", DESKTOP_APPS_ENDPOINT);
+  if (!response.ok) {
+    throw new Error(`Desktop apps server returned ${response.status}`);
+  }
+
+  const result = await response.json();
+  return Array.isArray(result.apps) ? result.apps : [];
+}
+
+async function launchDesktopAppFromServer(appId) {
+  if (typeof appId !== "string" || appId.length === 0) {
+    throw new Error("Invalid desktop app id");
+  }
+
+  const response = await fetchLocalServer("desktop-app-launch", DESKTOP_APP_LAUNCH_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      source: "chrome-extension:tab-switcher",
+      appId
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Desktop app server returned ${response.status}`);
+  }
+
+  return response.json();
+}
+
 function scheduleSync(reason) {
   if (pendingSyncTimer !== null) {
     clearTimeout(pendingSyncTimer);
@@ -1722,6 +1759,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach tab event log failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === GET_DESKTOP_APPS_MESSAGE) {
+    void getDesktopAppsFromServer()
+      .then((apps) => {
+        sendResponse({ ok: true, apps });
+      })
+      .catch((error) => {
+        console.error("Tabcoach desktop app list failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === LAUNCH_DESKTOP_APP_MESSAGE) {
+    void launchDesktopAppFromServer(message.appId)
+      .then((result) => {
+        sendResponse({ ok: true, app: result?.app, launched: Boolean(result?.launched) });
+      })
+      .catch((error) => {
+        console.error("Tabcoach desktop app launch failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

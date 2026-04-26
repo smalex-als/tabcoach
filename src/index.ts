@@ -29,6 +29,12 @@ type RegistryData = {
   documents: LinkRecord[];
 };
 
+type DesktopApp = {
+  id: string;
+  label: string;
+  macAppName: string;
+};
+
 type Config = {
   host: string;
   port: number;
@@ -36,6 +42,7 @@ type Config = {
   tabSwitchLogPath: string;
   tabEventLogPath: string;
   ttsClipboardAppPath: string;
+  desktopApps: DesktopApp[];
   openAiApiKey?: string;
   openAiTranslationModel: string;
   dropHash: boolean;
@@ -71,6 +78,19 @@ type TabEventPayload = {
   tab?: BrowserTab | null;
 };
 
+type DesktopAppLaunchPayload = {
+  appId?: string;
+  source?: string;
+};
+
+const DEFAULT_DESKTOP_APPS: DesktopApp[] = [
+  {
+    id: "iterm",
+    label: "iTerm",
+    macAppName: "iTerm"
+  }
+];
+
 const DEFAULT_TRACKING_PARAMS = new Set([
   "fbclid",
   "gclid",
@@ -102,6 +122,55 @@ function readNumber(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function isDesktopApp(value: unknown): value is DesktopApp {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopApp>;
+  return (
+    typeof candidate.id === "string" &&
+    candidate.id.trim().length > 0 &&
+    typeof candidate.label === "string" &&
+    candidate.label.trim().length > 0 &&
+    typeof candidate.macAppName === "string" &&
+    candidate.macAppName.trim().length > 0
+  );
+}
+
+function readDesktopApps(): DesktopApp[] {
+  const rawApps = process.env.DESKTOP_APPS_JSON;
+  if (!rawApps) {
+    return DEFAULT_DESKTOP_APPS;
+  }
+
+  try {
+    const parsed = JSON.parse(rawApps);
+    if (!Array.isArray(parsed)) {
+      throw new Error("DESKTOP_APPS_JSON must be a JSON array");
+    }
+
+    const apps = parsed.filter(isDesktopApp).map((app) => ({
+      id: app.id.trim(),
+      label: app.label.trim(),
+      macAppName: app.macAppName.trim()
+    }));
+
+    return apps.length > 0 ? apps : DEFAULT_DESKTOP_APPS;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Invalid DESKTOP_APPS_JSON; using defaults. ${message}`);
+    return DEFAULT_DESKTOP_APPS;
+  }
+}
+
+function formatConfigForLog(config: Config): Config {
+  return {
+    ...config,
+    openAiApiKey: config.openAiApiKey ? "[set]" : undefined
+  };
+}
+
 function loadConfig(): Config {
   return {
     host: process.env.HOST ?? "127.0.0.1",
@@ -110,6 +179,7 @@ function loadConfig(): Config {
     tabSwitchLogPath: process.env.TAB_SWITCH_LOG_PATH ?? "tab-switch-log.jsonl",
     tabEventLogPath: process.env.TAB_EVENT_LOG_PATH ?? "tabcoach-events.jsonl",
     ttsClipboardAppPath: process.env.TTS_CLIPBOARD_APP_PATH ?? "/Users/smalex/bin/tts-clipboard",
+    desktopApps: readDesktopApps(),
     openAiApiKey: process.env.OPENAI_API_KEY,
     openAiTranslationModel: process.env.OPENAI_TRANSLATION_MODEL ?? "gpt-4.1-mini",
     dropHash: readBoolean("DROP_HASH", true),
@@ -649,6 +719,37 @@ function launchTtsClipboardApp(appPath: string): void {
   child.unref();
 }
 
+function findDesktopApp(appId: string, config: Config): DesktopApp | undefined {
+  return config.desktopApps.find((app) => app.id === appId);
+}
+
+async function launchDesktopApp(app: DesktopApp): Promise<void> {
+  if (process.platform !== "darwin") {
+    throw new Error("Desktop app launching is currently supported only on macOS");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("open", ["-a", app.macAppName], {
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(stderr || `open exited with code ${code}`));
+    });
+  });
+}
+
 function isBrowserTab(value: unknown): value is BrowserTab {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -769,6 +870,36 @@ async function handleTabEvent(request: IncomingMessage, response: ServerResponse
   });
 }
 
+async function handleDesktopAppLaunch(request: IncomingMessage, response: ServerResponse, config: Config): Promise<void> {
+  const body = await readJsonBody(request);
+  const payload = body as DesktopAppLaunchPayload;
+  const appId = typeof payload.appId === "string" ? payload.appId : "";
+  const app = findDesktopApp(appId, config);
+
+  if (!app) {
+    sendJson(response, 404, {
+      ok: false,
+      error: "Unknown desktop app"
+    });
+    return;
+  }
+
+  await launchDesktopApp(app);
+
+  console.log(
+    `[${new Date().toISOString()}] desktop app launch from ${payload.source ?? "unknown"}: ${app.label} (${app.macAppName})`
+  );
+
+  sendJson(response, 200, {
+    ok: true,
+    app: {
+      id: app.id,
+      label: app.label
+    },
+    launched: true
+  });
+}
+
 async function handleRequest(request: IncomingMessage, response: ServerResponse, config: Config): Promise<void> {
   if (!request.url) {
     sendJson(response, 404, { ok: false, error: "Missing URL" });
@@ -792,6 +923,22 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       port: config.port,
       repoListOutputPath: config.repoListOutputPath
     });
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/api/desktop-apps") {
+    sendJson(response, 200, {
+      ok: true,
+      apps: config.desktopApps.map((app) => ({
+        id: app.id,
+        label: app.label
+      }))
+    });
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/api/desktop-apps/launch") {
+    await handleDesktopAppLaunch(request, response, config);
     return;
   }
 
@@ -847,11 +994,13 @@ async function main(): Promise<void> {
   });
 
   console.log("tabcoach server started");
-  console.log(JSON.stringify(config, null, 2));
+  console.log(JSON.stringify(formatConfigForLog(config), null, 2));
   console.log(`POST tab snapshots to http://${config.host}:${config.port}/api/sync`);
   console.log(`POST selected text to http://${config.host}:${config.port}/api/tts-selection`);
   console.log(`POST tab switches to http://${config.host}:${config.port}/api/tab-switch`);
   console.log(`POST tab events to http://${config.host}:${config.port}/api/tab-event`);
+  console.log(`GET desktop apps from http://${config.host}:${config.port}/api/desktop-apps`);
+  console.log(`POST desktop app launches to http://${config.host}:${config.port}/api/desktop-apps/launch`);
 }
 
 void main().catch((error: unknown) => {

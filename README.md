@@ -58,6 +58,7 @@ Server defaults:
 - `TAB_SWITCH_LOG_PATH`: `tab-switch-log.jsonl`
 - `TAB_EVENT_LOG_PATH`: `tabcoach-events.jsonl`
 - `TTS_CLIPBOARD_APP_PATH`: `/Users/smalex/bin/tts-clipboard`
+- `DESKTOP_APPS_JSON`: optional desktop app allowlist, defaults to iTerm
 - `OPENAI_TRANSLATION_MODEL`: `gpt-4.1-mini`
 
 Health check:
@@ -84,6 +85,7 @@ The extension will:
 - show, create, drag-reorder, bookmark, copy URLs, close, and switch between tabs in the current window with `Command+E` on macOS, including inline duplicate indicators, tab group labels, search, and recently visited sorting
 - assign numeric tab bookmark 1 from any page with `Ctrl+Shift+1` (`Control+Shift+1` on macOS), then jump with `Ctrl+1`; slots 2 through 5 are also available as extension commands and can be assigned in `chrome://extensions/shortcuts`; saved numeric bookmarks show a small in-page notification; the `Command+E` popup supports slots 1 through 9
 - store bookmarks under `Tabcoach/<tab group name>` to keep saved tabs organized
+- show desktop app launcher buttons at the bottom of the `Command+E` popup; by default, the `iTerm` button asks the local server to run `open -a iTerm`
 - send selected page text to the local TTS flow with `Command+Shift+S` on macOS
 - show a badge and notification when TTS is started successfully
 
@@ -139,6 +141,22 @@ Document labels are read back from the saved Markdown links, so previously captu
 
 Switching tabs through the `Command+E` popup posts to `POST /api/tab-switch`. The server appends JSON Lines to local `tab-switch-log.jsonl` by default, including timestamp, source, previous tab, and target tab.
 Copying a tab URL through the popup posts to `POST /api/tab-event`. The server appends JSON Lines to local `tabcoach-events.jsonl` by default.
+
+## Desktop App Launcher
+
+The `Command+E` popup loads desktop app buttons from `GET /api/desktop-apps` and launches them through `POST /api/desktop-apps/launch`.
+
+Default allowlist:
+
+```json
+[{"id":"iterm","label":"iTerm","macAppName":"iTerm"}]
+```
+
+To add more macOS apps, start the server with `DESKTOP_APPS_JSON`:
+
+```bash
+DESKTOP_APPS_JSON='[{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"notes","label":"Notes","macAppName":"Notes"}]' npm run dev
+```
 
 ## TTS Shortcut
 
