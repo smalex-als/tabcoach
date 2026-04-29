@@ -92,9 +92,11 @@ The extension will:
 - send selected page text to the local TTS flow; assign the `Speak selection` shortcut from `chrome://extensions/shortcuts`
 - show a badge and notification when TTS is started successfully
 - keep a per-window activation history and expose previous/next history commands for jumping backward and forward between recently active tabs in the same window
+- show a tab movement statistics page from extension options, backed by the local tab switch log
 
 Extension settings are available from `chrome://extensions` -> `Tabcoach` -> `Details` -> `Extension options`.
 Settings include an option to open the `Command+E` tab switcher as a left-side window next to the current Chrome window. In left-side mode, selecting a tab keeps the switcher open while focus moves to the selected tab.
+Use the `Stats` button in extension options to open tab movement statistics.
 
 The `Command+E` popup includes a `+` button that opens a new tab before the currently active tab in the source window. If the active tab is in a Chrome tab group, the new tab is added to the same group.
 The `Previous tab` shortcut defaults to `Ctrl+Q` (`Control+Q` on macOS) and can be changed from `chrome://extensions/shortcuts`. The `Next tab in history` command is available there too; Chrome may not allow `Ctrl+W` because it normally closes the current tab.
@@ -145,6 +147,7 @@ Document labels are read back from the saved Markdown links, so previously captu
 ## Tab Switch Log
 
 Switching tabs through the `Command+E` popup posts to `POST /api/tab-switch`. The server appends JSON Lines to local `tab-switch-log.jsonl` by default, including timestamp, source, previous tab, and target tab.
+The stats page reads aggregates from `GET /api/tab-switch-stats`, including totals, today, last 7 days, average switches per day, daily counts for the last 7 days, today-specific routes and domain breakdowns, estimated focus time by domain, top target domains, top routes, sources, and recent switches with estimated time spent. Focus intervals longer than 15 minutes are treated as idle and excluded from time totals.
 Copying a tab URL through the popup posts to `POST /api/tab-event`. The server appends JSON Lines to local `tabcoach-events.jsonl` by default.
 
 ## Desktop App Launcher

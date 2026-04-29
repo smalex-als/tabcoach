@@ -70,6 +70,13 @@ type TabSwitchPayload = {
   to?: BrowserTab | null;
 };
 
+type TabSwitchLogRecord = {
+  switchedAt: string;
+  source: string;
+  from: BrowserTab | null;
+  to: BrowserTab | null;
+};
+
 type TabEventPayload = {
   eventType?: string;
   occurredAt?: string;
@@ -106,6 +113,8 @@ const DEFAULT_TRACKING_PARAMS = new Set([
   "utm_source",
   "utm_term"
 ]);
+const MAX_FOCUS_DURATION_MS = 15 * 60 * 1000;
+const RECENT_SWITCH_LIMIT = 50;
 
 function readBoolean(name: string, fallback: boolean): boolean {
   const value = process.env[name];
@@ -826,7 +835,7 @@ async function handleTabSwitch(request: IncomingMessage, response: ServerRespons
   const body = await readJsonBody(request);
   const payload = body as TabSwitchPayload;
   const switchedAt = typeof payload.switchedAt === "string" ? payload.switchedAt : new Date().toISOString();
-  const record = {
+  const record: TabSwitchLogRecord = {
     switchedAt,
     source: payload.source ?? "unknown",
     from: payload.from && isBrowserTab(payload.from) ? payload.from : null,
@@ -843,6 +852,229 @@ async function handleTabSwitch(request: IncomingMessage, response: ServerRespons
   sendJson(response, 200, {
     ok: true,
     logged: true
+  });
+}
+
+function parseTabSwitchLogLine(line: string): TabSwitchLogRecord | null {
+  try {
+    const parsed = JSON.parse(line) as Partial<TabSwitchLogRecord>;
+    if (typeof parsed.switchedAt !== "string") {
+      return null;
+    }
+
+    return {
+      switchedAt: parsed.switchedAt,
+      source: typeof parsed.source === "string" && parsed.source ? parsed.source : "unknown",
+      from: parsed.from && isBrowserTab(parsed.from) ? parsed.from : null,
+      to: parsed.to && isBrowserTab(parsed.to) ? parsed.to : null
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function readTabSwitchLog(config: Config): Promise<TabSwitchLogRecord[]> {
+  try {
+    const contents = await readFile(config.tabSwitchLogPath, "utf8");
+    return contents
+      .split(/\r\n|\n|\r/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(parseTabSwitchLogLine)
+      .filter((record): record is TabSwitchLogRecord => Boolean(record))
+      .sort((left, right) => Date.parse(left.switchedAt) - Date.parse(right.switchedAt));
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code?: string }).code) : "";
+    if (code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+function getTabHostname(tab: BrowserTab | null): string {
+  if (!tab?.url) {
+    return "(unknown)";
+  }
+
+  try {
+    const parsed = new URL(tab.url);
+    if (parsed.protocol === "chrome-extension:") {
+      return "Tabcoach";
+    }
+
+    return parsed.hostname.replace(/^www\./, "") || "(unknown)";
+  } catch {
+    return "(unknown)";
+  }
+}
+
+function getTabLabel(tab: BrowserTab | null): string {
+  const title = tab?.title?.trim();
+  if (title) {
+    return title.length > 90 ? `${title.slice(0, 87)}...` : title;
+  }
+
+  return getTabHostname(tab);
+}
+
+function getTopCounts(values: string[], limit: number): { label: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label))
+    .slice(0, limit);
+}
+
+function getTabTimeKey(tab: BrowserTab | null): string {
+  return `${getTabLabel(tab)}\n${getTabHostname(tab)}`;
+}
+
+function formatTabTimeLabel(key: string): { title: string; domain: string } {
+  const [title, domain] = key.split("\n");
+  return {
+    title: title || "(unknown)",
+    domain: domain || "(unknown)"
+  };
+}
+
+function getTopDurations(
+  records: TabSwitchLogRecord[],
+  getKey: (record: TabSwitchLogRecord) => string,
+  limit: number
+): { label: string; title?: string; domain?: string; durationMs: number }[] {
+  const durations = new Map<string, number>();
+
+  for (let index = 0; index < records.length - 1; index += 1) {
+    const currentRecord = records[index];
+    const nextRecord = records[index + 1];
+    if (!currentRecord || !nextRecord) {
+      continue;
+    }
+
+    const startedAtMs = Date.parse(currentRecord.switchedAt);
+    const endedAtMs = Date.parse(nextRecord.switchedAt);
+    const durationMs = endedAtMs - startedAtMs;
+    if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > MAX_FOCUS_DURATION_MS) {
+      continue;
+    }
+
+    const key = getKey(currentRecord);
+    durations.set(key, (durations.get(key) ?? 0) + durationMs);
+  }
+
+  return [...durations.entries()]
+    .map(([label, durationMs]) => ({ label, durationMs }))
+    .sort((left, right) => right.durationMs - left.durationMs || left.label.localeCompare(right.label))
+    .slice(0, limit)
+    .map((item) => {
+      if (!item.label.includes("\n")) {
+        return item;
+      }
+
+      return {
+        ...item,
+        ...formatTabTimeLabel(item.label)
+      };
+    });
+}
+
+function getTotalTrackedFocusTimeMs(records: TabSwitchLogRecord[]): number {
+  return getTopDurations(records, () => "__total__", 1)[0]?.durationMs ?? 0;
+}
+
+function formatLocalDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getLastSevenDayStats(datedRecords: { switchedAtMs: number }[], now: Date): { date: string; count: number }[] {
+  const countsByDate = new Map<string, number>();
+
+  datedRecords.forEach((entry) => {
+    const key = formatLocalDateKey(new Date(entry.switchedAtMs));
+    countsByDate.set(key, (countsByDate.get(key) ?? 0) + 1);
+  });
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(now);
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() - (6 - index));
+    const key = formatLocalDateKey(date);
+    return {
+      date: key,
+      count: countsByDate.get(key) ?? 0
+    };
+  });
+}
+
+async function handleTabSwitchStats(response: ServerResponse, config: Config): Promise<void> {
+  const records = await readTabSwitchLog(config);
+  const now = new Date();
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const datedRecords = records
+    .map((record) => ({ record, switchedAtMs: Date.parse(record.switchedAt) }))
+    .filter((entry) => Number.isFinite(entry.switchedAtMs));
+  const todayRecords = datedRecords.filter((entry) => entry.switchedAtMs >= todayStart.getTime()).map((entry) => entry.record);
+  const todaySwitches = todayRecords.length;
+  const lastSevenDays = getLastSevenDayStats(datedRecords, now);
+  const lastSevenDaySwitches = lastSevenDays.reduce((sum, day) => sum + day.count, 0);
+  const latestRecords = [...records].reverse().slice(0, RECENT_SWITCH_LIMIT);
+
+  sendJson(response, 200, {
+    ok: true,
+    generatedAt: now.toISOString(),
+    logPath: config.tabSwitchLogPath,
+    totalSwitches: records.length,
+    todaySwitches,
+    sevenDaySwitches: lastSevenDaySwitches,
+    averageSwitchesPerDay7d: lastSevenDaySwitches / 7,
+    lastSevenDays,
+    totalTrackedFocusTimeMs: getTotalTrackedFocusTimeMs(records),
+    todayTrackedFocusTimeMs: getTotalTrackedFocusTimeMs(todayRecords),
+    todayTopTimeByDomain: getTopDurations(todayRecords, (record) => getTabHostname(record.to), 10),
+    todayTopTargetDomains: getTopCounts(todayRecords.map((record) => getTabHostname(record.to)), 10),
+    todayTopRoutes: getTopCounts(
+      todayRecords.map((record) => `${getTabHostname(record.from)} -> ${getTabHostname(record.to)}`),
+      10
+    ),
+    topTimeByDomain: getTopDurations(records, (record) => getTabHostname(record.to), 10),
+    topTimeByTab: getTopDurations(records, (record) => getTabTimeKey(record.to), 10),
+    firstSwitchAt: records[0]?.switchedAt ?? null,
+    topSources: getTopCounts(records.map((record) => record.source), 8),
+    topTargetDomains: getTopCounts(records.map((record) => getTabHostname(record.to)), 10),
+    topRoutes: getTopCounts(
+      records.map((record) => `${getTabHostname(record.from)} -> ${getTabHostname(record.to)}`),
+      10
+    ),
+    recentSwitches: latestRecords.map((record) => {
+      const recordIndex = records.indexOf(record);
+      const nextRecord = recordIndex >= 0 ? records[recordIndex + 1] : undefined;
+      const rawDurationMs = nextRecord ? Date.parse(nextRecord.switchedAt) - Date.parse(record.switchedAt) : null;
+      const durationMs =
+        typeof rawDurationMs === "number" && Number.isFinite(rawDurationMs) && rawDurationMs > 0 && rawDurationMs <= MAX_FOCUS_DURATION_MS
+          ? rawDurationMs
+          : null;
+
+      return {
+        switchedAt: record.switchedAt,
+        source: record.source,
+        durationMs,
+        ignoredIdle: typeof rawDurationMs === "number" && rawDurationMs > MAX_FOCUS_DURATION_MS,
+        fromTitle: getTabLabel(record.from),
+        fromDomain: getTabHostname(record.from),
+        toTitle: getTabLabel(record.to),
+        toDomain: getTabHostname(record.to)
+      };
+    })
   });
 }
 
@@ -957,6 +1189,11 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return;
   }
 
+  if (request.method === "GET" && request.url === "/api/tab-switch-stats") {
+    await handleTabSwitchStats(response, config);
+    return;
+  }
+
   if (request.method === "POST" && request.url === "/api/tab-event") {
     await handleTabEvent(request, response, config);
     return;
@@ -998,6 +1235,7 @@ async function main(): Promise<void> {
   console.log(`POST tab snapshots to http://${config.host}:${config.port}/api/sync`);
   console.log(`POST selected text to http://${config.host}:${config.port}/api/tts-selection`);
   console.log(`POST tab switches to http://${config.host}:${config.port}/api/tab-switch`);
+  console.log(`GET tab switch stats from http://${config.host}:${config.port}/api/tab-switch-stats`);
   console.log(`POST tab events to http://${config.host}:${config.port}/api/tab-event`);
   console.log(`GET desktop apps from http://${config.host}:${config.port}/api/desktop-apps`);
   console.log(`POST desktop app launches to http://${config.host}:${config.port}/api/desktop-apps/launch`);

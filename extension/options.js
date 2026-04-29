@@ -11,6 +11,7 @@ const DEFAULT_SETTINGS = {
 const form = document.getElementById("settingsForm");
 const status = document.getElementById("status");
 const resetButton = document.getElementById("resetButton");
+const statsButton = document.getElementById("statsButton");
 const fields = {
   serverBaseUrl: document.getElementById("serverBaseUrl"),
   autoCloseDuplicates: document.getElementById("autoCloseDuplicates"),
@@ -91,6 +92,10 @@ resetButton.addEventListener("click", () => {
     writeFormSettings(DEFAULT_SETTINGS);
     showStatus("Reset");
   });
+});
+
+statsButton.addEventListener("click", () => {
+  void chrome.tabs.create({ url: chrome.runtime.getURL("stats.html") });
 });
 
 void loadSettings();

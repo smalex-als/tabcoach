@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tabcoach Stats</title>
+    <link rel="stylesheet" href="stats.css">
+  </head>
+  <body>
+    <main class="page">
+      <header class="header">
+        <div>
+          <h1>Tab Movement Stats</h1>
+          <div class="meta" id="meta">Loading</div>
+        </div>
+        <div class="actions">
+          <button class="secondary" type="button" id="settingsButton" aria-label="Open settings" title="Open settings">Settings</button>
+          <button class="primary" type="button" id="refreshButton" aria-label="Refresh stats" title="Refresh stats">Refresh</button>
+        </div>
+      </header>
+
+      <section class="summary-grid" aria-label="Summary">
+        <div class="metric">
+          <span class="metric-label">Total</span>
+          <strong id="totalSwitches">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Today</span>
+          <strong id="todaySwitches">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Last 7 days</span>
+          <strong id="sevenDaySwitches">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Avg / day</span>
+          <strong id="averageSwitchesPerDay">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Tracked time</span>
+          <strong id="totalTrackedFocusTime">0m</strong>
+        </div>
+      </section>
+
+      <section class="stats-layout">
+        <section class="panel">
+          <h2>Today Time by Domain</h2>
+          <div class="duration-list" id="todayTopTimeByDomain"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Today Target Domains</h2>
+          <div class="rank-list" id="todayTopTargetDomains"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Today Routes</h2>
+          <div class="rank-list" id="todayTopRoutes"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Time by Domain</h2>
+          <div class="duration-list" id="topTimeByDomain"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Last 7 Days</h2>
+          <div class="day-list" id="lastSevenDays"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Top Target Domains</h2>
+          <div class="rank-list" id="topTargetDomains"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Top Routes</h2>
+          <div class="rank-list" id="topRoutes"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Sources</h2>
+          <div class="rank-list" id="topSources"></div>
+        </section>
+      </section>
+
+      <section class="panel recent-panel">
+        <h2>Recent Switches</h2>
+        <div class="recent-list" id="recentSwitches"></div>
+      </section>
+    </main>
+    <script src="stats.js"></script>
+  </body>
+</html>

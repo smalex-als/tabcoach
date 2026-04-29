@@ -10,6 +10,7 @@ const DEFAULT_SETTINGS = {
 const SYNC_ENDPOINT = "/api/sync";
 const TTS_SELECTION_ENDPOINT = "/api/tts-selection";
 const TAB_SWITCH_LOG_ENDPOINT = "/api/tab-switch";
+const TAB_SWITCH_STATS_ENDPOINT = "/api/tab-switch-stats";
 const TAB_EVENT_LOG_ENDPOINT = "/api/tab-event";
 const DESKTOP_APPS_ENDPOINT = "/api/desktop-apps";
 const DESKTOP_APP_LAUNCH_ENDPOINT = "/api/desktop-apps/launch";
@@ -47,6 +48,7 @@ const OPEN_GROUP_SNAPSHOT_BOOKMARKS_MESSAGE = "tabcoach:open-group-snapshot-book
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
+const GET_TAB_SWITCH_STATS_MESSAGE = "tabcoach:get-tab-switch-stats";
 const GET_DESKTOP_APPS_MESSAGE = "tabcoach:get-desktop-apps";
 const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
@@ -1677,7 +1679,9 @@ async function switchToTab(tabId, context = {}) {
   const targetTab = await chrome.tabs.get(tabId);
   assertTabInSwitcherWindow(targetTab, context, "switch to");
   const sourceWindowId = getSwitcherContextWindowId(context);
-  const fromTab = context.senderTab ?? (await getActiveTabInWindow(sourceWindowId));
+  const fromTab = isTabSwitcherUrl(context.senderTab?.url)
+    ? await getActiveTabInWindow(sourceWindowId)
+    : context.senderTab ?? (await getActiveTabInWindow(sourceWindowId));
 
   if (typeof targetTab.groupId === "number" && targetTab.groupId >= 0) {
     await chrome.tabGroups.update(targetTab.groupId, { collapsed: false });
@@ -2219,6 +2223,15 @@ async function logTabEventFromSwitcher(payload) {
   }
 }
 
+async function getTabSwitchStatsFromServer() {
+  const response = await fetchLocalServer("tab-switch-stats", TAB_SWITCH_STATS_ENDPOINT);
+  if (!response.ok) {
+    throw new Error(`Tab switch stats server returned ${response.status}`);
+  }
+
+  return response.json();
+}
+
 async function getDesktopAppsFromServer() {
   const response = await fetchLocalServer("desktop-apps", DESKTOP_APPS_ENDPOINT);
   if (!response.ok) {
@@ -2435,6 +2448,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach tab event log failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === GET_TAB_SWITCH_STATS_MESSAGE) {
+    void getTabSwitchStatsFromServer()
+      .then((stats) => {
+        sendResponse({ ok: true, stats });
+      })
+      .catch((error) => {
+        console.error("Tabcoach tab switch stats failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 
