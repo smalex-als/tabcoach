@@ -807,7 +807,7 @@ function toTabSwitcherItem(tab, group = null) {
 }
 
 function getBookmarkSnapshotFolderTitle(baseTitle) {
-  return `${normalizeBookmarkFolderTitle(baseTitle)} - ${formatBookmarkSnapshotTimestamp()}`;
+  return normalizeBookmarkFolderTitle(baseTitle);
 }
 
 async function collectGroupSnapshotTitles() {
@@ -820,19 +820,39 @@ async function collectGroupSnapshotTitles() {
   return new Set(children.filter((bookmark) => !bookmark.url).map((bookmark) => bookmark.title));
 }
 
-async function collectBookmarkedUrls(tabs) {
-  const bookmarkedUrls = new Set();
+async function collectBookmarkedTabIds(tabs, tabGroupsById) {
+  const bookmarkedTabIds = new Set();
+  const rootFolderId = await findBookmarkFolderId();
+  if (!rootFolderId) {
+    return bookmarkedTabIds;
+  }
+
+  const rootChildren = await chrome.bookmarks.getChildren(rootFolderId);
+  const foldersByTitle = new Map(rootChildren.filter((bookmark) => !bookmark.url).map((bookmark) => [bookmark.title, bookmark]));
+  const folderBookmarksById = new Map();
 
   await Promise.all(
     tabs.map(async (tab) => {
-      if (!tab.url) {
+      if (typeof tab.id !== "number" || !tab.url) {
         return;
       }
 
       try {
-        const bookmarks = await chrome.bookmarks.search({ url: tab.url });
-        if (bookmarks.some((bookmark) => bookmark.url === tab.url)) {
-          bookmarkedUrls.add(tab.url);
+        const group = typeof tab.groupId === "number" && tab.groupId >= 0 ? tabGroupsById.get(tab.groupId) : null;
+        const folderTitle = normalizeBookmarkFolderTitle(group?.title || "Ungrouped");
+        const folder = foldersByTitle.get(folderTitle);
+        if (!folder?.id) {
+          return;
+        }
+
+        let folderBookmarks = folderBookmarksById.get(folder.id);
+        if (!folderBookmarks) {
+          folderBookmarks = await chrome.bookmarks.getChildren(folder.id);
+          folderBookmarksById.set(folder.id, folderBookmarks);
+        }
+
+        if (folderBookmarks.some((bookmark) => bookmark.url === tab.url)) {
+          bookmarkedTabIds.add(tab.id);
         }
       } catch (error) {
         console.warn("Tabcoach bookmark lookup failed", tab.url, error);
@@ -840,7 +860,7 @@ async function collectBookmarkedUrls(tabs) {
     })
   );
 
-  return bookmarkedUrls;
+  return bookmarkedTabIds;
 }
 
 async function collectTabSwitcherItems(windowId) {
@@ -848,7 +868,7 @@ async function collectTabSwitcherItems(windowId) {
   const tabGroups = await chrome.tabGroups.query({ windowId });
   const tabGroupsById = new Map(tabGroups.map((group) => [group.id, group]));
   const snapshotFolderTitles = await collectGroupSnapshotTitles();
-  const bookmarkedUrls = await collectBookmarkedUrls(currentWindowTabs);
+  const bookmarkedTabIds = await collectBookmarkedTabIds(currentWindowTabs, tabGroupsById);
 
   const items = currentWindowTabs.map((tab) => {
     const group = typeof tab.groupId === "number" && tab.groupId >= 0 ? tabGroupsById.get(tab.groupId) : null;
@@ -865,7 +885,7 @@ async function collectTabSwitcherItems(windowId) {
             snapshotExists: groupSnapshotExists
           }
         : null,
-      bookmarked: Boolean(tab.url && bookmarkedUrls.has(tab.url))
+      bookmarked: Boolean(typeof tab.id === "number" && bookmarkedTabIds.has(tab.id))
     };
   });
 
@@ -1731,7 +1751,9 @@ async function renameGroupFromSwitcher(groupId, title, context = {}) {
     throw new Error("Cannot rename a group outside the current window");
   }
 
-  await chrome.tabGroups.update(groupId, { title: title.trim() });
+  const nextTitle = title.trim();
+  await chrome.tabGroups.update(groupId, { title: nextTitle });
+  await renameBookmarkSnapshotFolder(group.title || "Unnamed group", nextTitle || "Unnamed group");
   return collectTabSwitcherItems(windowId);
 }
 
@@ -1768,25 +1790,20 @@ async function getOrCreateBookmarkSubfolder(parentId, title) {
   return folder.id;
 }
 
+async function findBookmarkSubfolderId(parentId, title) {
+  const children = await chrome.bookmarks.getChildren(parentId);
+  const existingFolder = children.find((bookmark) => bookmark.title === title && !bookmark.url);
+  return existingFolder?.id ?? null;
+}
+
 function normalizeBookmarkFolderTitle(title) {
   const normalized = typeof title === "string" ? title.trim().replace(/\s+/g, " ") : "";
   return normalized || "Ungrouped";
 }
 
-function formatBookmarkSnapshotTimestamp(date = new Date()) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return [
-    date.getFullYear(),
-    "-",
-    pad(date.getMonth() + 1),
-    "-",
-    pad(date.getDate())
-  ].join("");
-}
-
 async function createBookmarkSnapshotFolder(parentId, baseTitle) {
   const children = await chrome.bookmarks.getChildren(parentId);
-  const snapshotTitle = `${normalizeBookmarkFolderTitle(baseTitle)} - ${formatBookmarkSnapshotTimestamp()}`;
+  const snapshotTitle = getBookmarkSnapshotFolderTitle(baseTitle);
   const existingFolder = children.find((bookmark) => bookmark.title === snapshotTitle && !bookmark.url);
 
   if (existingFolder?.id) {
@@ -1798,8 +1815,28 @@ async function createBookmarkSnapshotFolder(parentId, baseTitle) {
 
 async function findBookmarkSnapshotFolder(parentId, baseTitle) {
   const children = await chrome.bookmarks.getChildren(parentId);
-  const snapshotTitle = `${normalizeBookmarkFolderTitle(baseTitle)} - ${formatBookmarkSnapshotTimestamp()}`;
+  const snapshotTitle = getBookmarkSnapshotFolderTitle(baseTitle);
   return children.find((bookmark) => bookmark.title === snapshotTitle && !bookmark.url) ?? null;
+}
+
+async function renameBookmarkSnapshotFolder(previousTitle, nextTitle) {
+  const previousFolderTitle = getBookmarkSnapshotFolderTitle(previousTitle);
+  const nextFolderTitle = getBookmarkSnapshotFolderTitle(nextTitle);
+  if (previousFolderTitle === nextFolderTitle) {
+    return;
+  }
+
+  const rootFolderId = await findBookmarkFolderId();
+  if (!rootFolderId) {
+    return;
+  }
+
+  const existingFolder = await findBookmarkSnapshotFolder(rootFolderId, previousTitle);
+  if (!existingFolder?.id) {
+    return;
+  }
+
+  await chrome.bookmarks.update(existingFolder.id, { title: nextFolderTitle });
 }
 
 async function bookmarkGroupSnapshotFromSwitcher(groupId, context = {}) {
@@ -1914,16 +1951,22 @@ async function toggleBookmarkFromSwitcher(tabId, title, url, groupTitle, context
   const targetTab = await chrome.tabs.get(tabId);
   assertTabInSwitcherWindow(targetTab, context, "bookmark");
 
-  const existingBookmarks = await chrome.bookmarks.search({ url });
-  const existingBookmark = existingBookmarks.find((bookmark) => bookmark.url === url);
-
-  if (existingBookmark?.id) {
-    await chrome.bookmarks.remove(existingBookmark.id);
-    return false;
+  const folderTitle = normalizeBookmarkFolderTitle(groupTitle);
+  const existingRootFolderId = await findBookmarkFolderId();
+  if (existingRootFolderId) {
+    const existingParentId = await findBookmarkSubfolderId(existingRootFolderId, folderTitle);
+    if (existingParentId) {
+      const existingBookmarks = await chrome.bookmarks.getChildren(existingParentId);
+      const matchingBookmarks = existingBookmarks.filter((bookmark) => bookmark.url === url);
+      if (matchingBookmarks.length > 0) {
+        await Promise.all(matchingBookmarks.map((bookmark) => chrome.bookmarks.remove(bookmark.id)));
+        return false;
+      }
+    }
   }
 
   const rootFolderId = await getOrCreateBookmarkFolder();
-  const parentId = await getOrCreateBookmarkSubfolder(rootFolderId, normalizeBookmarkFolderTitle(groupTitle));
+  const parentId = await getOrCreateBookmarkSubfolder(rootFolderId, folderTitle);
   await chrome.bookmarks.create({
     parentId,
     title: typeof title === "string" && title.trim() ? title.trim() : targetTab.title ?? url,
