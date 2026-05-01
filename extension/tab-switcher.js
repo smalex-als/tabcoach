@@ -56,9 +56,6 @@ const list = document.getElementById("list");
 const desktopApps = document.getElementById("desktopApps");
 const searchInput = document.getElementById("searchInput");
 const newTabButton = document.getElementById("newTabButton");
-const groupSelectedButton = document.getElementById("groupSelectedButton");
-const moveGroupSelectedButton = document.getElementById("moveGroupSelectedButton");
-const duplicateSelectedButton = document.getElementById("duplicateSelectedButton");
 const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
 
@@ -80,6 +77,7 @@ let dropTarget = null;
 let refreshTimer = null;
 let suppressNextRowClick = false;
 let pointerDownRowIndex = null;
+let contextMenu = null;
 
 function sendMessage(message) {
   return chrome.runtime.sendMessage({ windowId, ...message });
@@ -194,6 +192,17 @@ function findDuplicateCountsByTabId(tabItems) {
   return counts;
 }
 
+function getDuplicateTabsForTab(tab) {
+  if (!tab?.url || tab.url.startsWith("chrome://")) {
+    return [];
+  }
+
+  const normalizedUrl = normalizeUrl(tab.url);
+  return tabs.filter(
+    (item) => Number.isFinite(item.id) && item.id !== tab.id && item.url && normalizeUrl(item.url) === normalizedUrl
+  );
+}
+
 function refreshDuplicateCounts() {
   duplicateCountsByTabId = findDuplicateCountsByTabId(tabs);
 }
@@ -243,13 +252,12 @@ function updateSortButtons() {
   }
 }
 
-function getSelectedTab() {
-  const tabId = getSelectedTabId();
-  return typeof tabId === "number" ? tabs.find((tab) => tab.id === tabId) ?? null : null;
-}
-
 function getTabActionLabel(tab) {
   return tab?.displayTitle || tab?.title || tab?.url || "selected tab";
+}
+
+function getTabById(tabId) {
+  return tabs.find((tab) => tab.id === tabId) ?? null;
 }
 
 function getAvailableGroups() {
@@ -266,49 +274,12 @@ function getAvailableGroups() {
   );
 }
 
-function updateSelectedTabActionButtons() {
-  const selectedTab = getSelectedTab();
-  const hasSelectedTab = Boolean(selectedTab);
-  const availableGroups = getAvailableGroups();
-
-  duplicateSelectedButton.disabled = !hasSelectedTab;
-  duplicateSelectedButton.title = hasSelectedTab
-    ? `Duplicate selected tab: ${getTabActionLabel(selectedTab)}`
-    : "Select a tab first to duplicate it";
-  duplicateSelectedButton.setAttribute("aria-label", duplicateSelectedButton.title);
-
-  const canGroupSelectedTab = Boolean(selectedTab && !selectedTab.pinned);
-  groupSelectedButton.disabled = !canGroupSelectedTab;
-  groupSelectedButton.title = !hasSelectedTab
-    ? "Select a tab first to create a new group"
-    : selectedTab.pinned
-      ? "Unpin the selected tab before creating a group"
-      : `Create a new group from selected tab: ${getTabActionLabel(selectedTab)}`;
-  groupSelectedButton.setAttribute("aria-label", groupSelectedButton.title);
-
-  const canMoveSelectedTabToGroup = Boolean(
-    selectedTab &&
-      !selectedTab.pinned &&
-      (availableGroups.some((group) => group.id !== selectedTab.group?.id) || selectedTab.group)
-  );
-  moveGroupSelectedButton.disabled = !canMoveSelectedTabToGroup;
-  moveGroupSelectedButton.title = !hasSelectedTab
-    ? "Select a tab first to move it to a group"
-    : selectedTab.pinned
-      ? "Unpin the selected tab before moving it to a group"
-      : canMoveSelectedTabToGroup
-        ? `Move selected tab to another group: ${getTabActionLabel(selectedTab)}`
-        : "No other groups are available for the selected tab";
-  moveGroupSelectedButton.setAttribute("aria-label", moveGroupSelectedButton.title);
-}
-
 function applyRowState(scrollBlock = "nearest") {
   rows.forEach((row, index) => {
     row.setAttribute("aria-selected", String(index === selectedIndex));
   });
 
   rows[selectedIndex]?.scrollIntoView({ block: scrollBlock });
-  updateSelectedTabActionButtons();
 }
 
 function selectRelative(offset) {
@@ -496,17 +467,7 @@ async function createGroupForTab(tabId, currentTitle = "") {
   applyRowState();
 }
 
-async function createGroupForSelectedTab() {
-  const tab = getSelectedTab();
-  if (!tab?.id || tab.pinned) {
-    return;
-  }
-
-  await createGroupForTab(tab.id, tab.group?.title || "");
-}
-
-async function moveSelectedTabToGroup() {
-  const tab = getSelectedTab();
+async function moveTabToGroup(tab) {
   if (!tab?.id || tab.pinned) {
     return;
   }
@@ -640,15 +601,6 @@ async function duplicateTab(tabId) {
   closeAfterSwitchIfNeeded();
 }
 
-async function duplicateSelectedTab() {
-  const tab = getSelectedTab();
-  if (!tab?.id) {
-    return;
-  }
-
-  await duplicateTab(tab.id);
-}
-
 async function assignNumericBookmark(slot) {
   const tabId = getSelectedTabId();
   const tab = tabs.find((item) => item.id === tabId);
@@ -699,6 +651,36 @@ async function closeTab(tabId) {
   renderTabs();
   selectedIndex = Math.min(closedIndex >= 0 ? closedIndex : selectedIndex, rows.length - 1);
   applyRowState();
+}
+
+async function closeDuplicateTabsForTab(tab) {
+  const duplicateTabs = getDuplicateTabsForTab(tab);
+  if (duplicateTabs.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    duplicateTabs.map((duplicateTab) =>
+      sendMessage({ type: CLOSE_TAB_MESSAGE, tabId: duplicateTab.id }).then((response) =>
+        assertResponse(response, "Duplicate tab close failed")
+      )
+    )
+  );
+
+  const closedTabIds = new Set(duplicateTabs.map((duplicateTab) => duplicateTab.id));
+  tabs = tabs.filter((item) => !closedTabIds.has(item.id));
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+
+  if (tabs.length === 0) {
+    window.close();
+    return;
+  }
+
+  renderTabs();
+  selectedIndex = getRowIndexForTabOrGroup(tab.id);
+  applyRowState();
+  showShortcutNotification(`Closed ${duplicateTabs.length} duplicate${duplicateTabs.length === 1 ? "" : "s"}`);
 }
 
 async function toggleBookmark(tabId) {
@@ -925,7 +907,130 @@ function createButton(className, text, label, onClick) {
   return button;
 }
 
+function canMoveTabToGroup(tab) {
+  if (!tab || tab.pinned) {
+    return false;
+  }
+
+  return Boolean(getAvailableGroups().some((group) => group.id !== tab.group?.id) || tab.group);
+}
+
+function closeContextMenu() {
+  contextMenu?.remove();
+  contextMenu = null;
+}
+
+function focusContextMenuItem(offset) {
+  if (!contextMenu) {
+    return;
+  }
+
+  const items = [...contextMenu.querySelectorAll(".context-menu-item:not(:disabled)")];
+  if (items.length === 0) {
+    return;
+  }
+
+  const currentIndex = items.indexOf(document.activeElement);
+  const nextIndex = currentIndex >= 0 ? (currentIndex + offset + items.length) % items.length : 0;
+  items[nextIndex].focus();
+}
+
+function createContextMenuSeparator() {
+  const separator = document.createElement("div");
+  separator.className = "context-menu-separator";
+  separator.setAttribute("role", "separator");
+  return separator;
+}
+
+function createContextMenuItem(label, onClick, { disabled = false, tone = "" } = {}) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "context-menu-item";
+  item.setAttribute("role", "menuitem");
+  item.disabled = disabled;
+  item.textContent = label;
+  if (tone) {
+    item.dataset.tone = tone;
+  }
+  item.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (item.disabled) {
+      return;
+    }
+
+    closeContextMenu();
+    Promise.resolve(onClick()).catch(reportActionError);
+  });
+  return item;
+}
+
+function positionContextMenu(menu, clientX, clientY) {
+  menu.style.left = "0";
+  menu.style.top = "0";
+  document.body.appendChild(menu);
+
+  const margin = 8;
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(margin, Math.min(clientX, window.innerWidth - rect.width - margin));
+  const top = Math.max(margin, Math.min(clientY, window.innerHeight - rect.height - margin));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function openTabContextMenu(tab, rowIndex, clientX, clientY) {
+  closeContextMenu();
+  selectedIndex = rowIndex;
+  pointerDownRowIndex = null;
+  suppressNextRowClick = false;
+  applyRowState();
+
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `Actions for ${getTabActionLabel(tab)}`);
+
+  const canGroupTab = Boolean(tab && !tab.pinned);
+  const canMoveTab = canMoveTabToGroup(tab);
+  const duplicateTabs = getDuplicateTabsForTab(tab);
+  const menuItems = [
+    createContextMenuItem("Switch to tab", () => switchToSelectedTab()),
+    createContextMenuItem("Duplicate tab", () => duplicateTab(tab.id)),
+    createContextMenuItem("Copy URL", async () => {
+      const currentTab = getTabById(tab.id) ?? tab;
+      const copied = await copyTabUrl(tab.id);
+      logCopyTabUrl(currentTab, copied);
+      showShortcutNotification(copied ? "Copied URL" : "Copy failed");
+    }),
+    createContextMenuItem(tab.bookmarked ? "Remove bookmark" : "Bookmark tab", () => toggleBookmark(tab.id)),
+    createContextMenuSeparator(),
+    createContextMenuItem("Create new group", () => createGroupForTab(tab.id, tab.group?.title || ""), {
+      disabled: !canGroupTab
+    }),
+    createContextMenuItem("Move to group", () => moveTabToGroup(tab), {
+      disabled: !canMoveTab
+    }),
+    createContextMenuSeparator(),
+    ...(duplicateTabs.length > 0
+      ? [
+          createContextMenuItem(
+            `Close duplicate${duplicateTabs.length === 1 ? "" : "s"} (${duplicateTabs.length})`,
+            () => closeDuplicateTabsForTab(tab),
+            { tone: "danger" }
+          )
+        ]
+      : []),
+    createContextMenuItem("Close tab", () => closeTab(tab.id), { tone: "danger" })
+  ];
+  menu.append(...menuItems);
+
+  contextMenu = menu;
+  positionContextMenu(menu, clientX, clientY);
+  menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
+}
+
 function renderTabs({ scrollBlock = "nearest" } = {}) {
+  closeContextMenu();
   rows = [];
   tabRows = [];
   list.replaceChildren();
@@ -1061,6 +1166,11 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
       selectedIndex = rowIndex;
       void switchToSelectedTab().catch(reportActionError);
     });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openTabContextMenu(tab, rowIndex, event.clientX, event.clientY);
+    });
     row.addEventListener("dragstart", (event) => {
       if (sortMode !== "window") {
         event.preventDefault();
@@ -1160,21 +1270,10 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     );
     bookmarkButton.dataset.bookmarked = String(Boolean(tab.bookmarked));
 
-    const copyButton = createButton("copy", "⧉", `Copy URL for ${tab.displayTitle || tab.title || tab.url || "tab"}`, async (button) => {
-      const copied = await copyTabUrl(tab.id);
-      button.textContent = copied ? "✓" : "!";
-      button.style.color = copied ? "#86efac" : "#fca5a5";
-      logCopyTabUrl(tab, copied);
-      setTimeout(() => {
-        button.textContent = "⧉";
-        button.style.color = "";
-      }, 900);
-    });
-
     const closeTabButton = createButton("close", "×", `Close ${tab.displayTitle || tab.title || tab.url || "tab"}`, () => closeTab(tab.id));
 
     text.append(tabTitle, tabUrl);
-    row.append(icon, text, status, bookmarkButton, copyButton, closeTabButton);
+    row.append(icon, text, status, bookmarkButton, closeTabButton);
     rows.push(row);
     tabRows.push(row);
     list.appendChild(row);
@@ -1229,18 +1328,6 @@ newTabButton.addEventListener("click", () => {
   void createNewTab().catch(reportActionError);
 });
 
-groupSelectedButton.addEventListener("click", () => {
-  void createGroupForSelectedTab().catch(reportActionError);
-});
-
-moveGroupSelectedButton.addEventListener("click", () => {
-  void moveSelectedTabToGroup().catch(reportActionError);
-});
-
-duplicateSelectedButton.addEventListener("click", () => {
-  void duplicateSelectedTab().catch(reportActionError);
-});
-
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "sync" || !changes[NUMERIC_BOOKMARKS_KEY]) {
     return;
@@ -1260,6 +1347,19 @@ window.addEventListener("focus", () => {
 
 window.addEventListener("blur", () => {
   document.body.classList.add("window-blurred");
+  closeContextMenu();
+});
+
+window.addEventListener("resize", () => {
+  closeContextMenu();
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (!contextMenu || !(event.target instanceof Node) || contextMenu.contains(event.target)) {
+    return;
+  }
+
+  closeContextMenu();
 });
 
 searchInput.addEventListener("input", () => {
@@ -1305,6 +1405,10 @@ list.addEventListener("drop", (event) => {
 
   event.preventDefault();
   void moveDraggedTab().catch(reportActionError);
+});
+
+list.addEventListener("scroll", () => {
+  closeContextMenu();
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -1356,6 +1460,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (contextMenu) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeContextMenu();
+      searchInput.focus();
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusContextMenuItem(1);
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusContextMenuItem(-1);
+      return;
+    }
+
+    if (event.key === "Enter" || event.key === " ") {
+      if (document.activeElement instanceof HTMLButtonElement && contextMenu.contains(document.activeElement)) {
+        event.preventDefault();
+        document.activeElement.click();
+        return;
+      }
+    }
+  }
+
   const numericSlot = getNumericShortcutSlot(event);
   if (event.ctrlKey && !event.metaKey && !event.altKey && numericSlot) {
     event.preventDefault();

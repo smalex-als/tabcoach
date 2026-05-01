@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local TypeScript server plus Chrome extension for duplicate tab detection and repo registry export.",
+  "description": "Local TypeScript server plus Chrome extension for duplicate tab detection and tab switching.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
@@ -14,7 +14,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "openai": "^6.6.0",
     "ts-node": "^10.9.2"
   },
   "devDependencies": {

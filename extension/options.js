@@ -1,7 +1,6 @@
 const DEFAULT_SETTINGS = {
   serverBaseUrl: "http://127.0.0.1:3847",
   autoCloseDuplicates: true,
-  docsGrouping: true,
   fetchDiagnostics: true,
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
@@ -15,7 +14,6 @@ const statsButton = document.getElementById("statsButton");
 const fields = {
   serverBaseUrl: document.getElementById("serverBaseUrl"),
   autoCloseDuplicates: document.getElementById("autoCloseDuplicates"),
-  docsGrouping: document.getElementById("docsGrouping"),
   fetchDiagnostics: document.getElementById("fetchDiagnostics"),
   syncIntervalMinutes: document.getElementById("syncIntervalMinutes"),
   switcherOpenLeft: document.getElementById("switcherOpenLeft"),
@@ -44,7 +42,6 @@ function readFormSettings() {
   return {
     serverBaseUrl: sanitizeServerBaseUrl(fields.serverBaseUrl.value),
     autoCloseDuplicates: fields.autoCloseDuplicates.checked,
-    docsGrouping: fields.docsGrouping.checked,
     fetchDiagnostics: fields.fetchDiagnostics.checked,
     syncIntervalMinutes: Number(fields.syncIntervalMinutes.value),
     switcherOpenLeft: fields.switcherOpenLeft.checked,
@@ -55,7 +52,6 @@ function readFormSettings() {
 function writeFormSettings(settings) {
   fields.serverBaseUrl.value = settings.serverBaseUrl;
   fields.autoCloseDuplicates.checked = Boolean(settings.autoCloseDuplicates);
-  fields.docsGrouping.checked = Boolean(settings.docsGrouping);
   fields.fetchDiagnostics.checked = Boolean(settings.fetchDiagnostics);
   fields.syncIntervalMinutes.value = String(settings.syncIntervalMinutes);
   fields.switcherOpenLeft.checked = Boolean(settings.switcherOpenLeft);

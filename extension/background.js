@@ -1,14 +1,12 @@
 const DEFAULT_SETTINGS = {
   serverBaseUrl: "http://127.0.0.1:3847",
   autoCloseDuplicates: true,
-  docsGrouping: true,
   fetchDiagnostics: true,
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
   badgeMode: "both"
 };
 const SYNC_ENDPOINT = "/api/sync";
-const TTS_SELECTION_ENDPOINT = "/api/tts-selection";
 const TAB_SWITCH_LOG_ENDPOINT = "/api/tab-switch";
 const TAB_SWITCH_STATS_ENDPOINT = "/api/tab-switch-stats";
 const TAB_EVENT_LOG_ENDPOINT = "/api/tab-event";
@@ -20,11 +18,8 @@ const DEFAULT_SWITCHER_POPUP_WIDTH = 940;
 const DEFAULT_SWITCHER_POPUP_HEIGHT = 720;
 const LEFT_SWITCHER_POPUP_WIDTH = 800;
 const NEW_TAB_DUPLICATE_GRACE_MS = 3 * 60 * 1000;
-const DOCS_GROUP_TITLE = "Docs";
-const DOCS_GROUP_COLOR = "blue";
 const TRANSIENT_RETRY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_DELAY_MS = 500;
-const TTS_SUCCESS_BADGE_MS = 3000;
 const NUMERIC_BOOKMARK_BADGE_MS = 1500;
 const ACTION_TITLE = "Tabcoach";
 const TAB_SWITCHER_PAGE = "tab-switcher.html";
@@ -108,7 +103,6 @@ function sanitizeSettings(settings) {
   return {
     serverBaseUrl,
     autoCloseDuplicates: Boolean(settings.autoCloseDuplicates),
-    docsGrouping: Boolean(settings.docsGrouping),
     fetchDiagnostics: Boolean(settings.fetchDiagnostics),
     syncIntervalMinutes: Number.isFinite(syncIntervalMinutes) && syncIntervalMinutes >= 1 ? syncIntervalMinutes : DEFAULT_SETTINGS.syncIntervalMinutes,
     switcherOpenLeft: Boolean(settings.switcherOpenLeft),
@@ -568,20 +562,6 @@ async function getFocusedWindowId() {
   }
 }
 
-function isDocsUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-
-    if (parsed.hostname !== "docs.google.com") {
-      return false;
-    }
-
-    return /^\/(document|spreadsheets|presentation)\/d\/[^/]+/.test(parsed.pathname);
-  } catch {
-    return false;
-  }
-}
-
 async function collectTabs() {
   const tabs = await chrome.tabs.query({});
   return tabs
@@ -684,70 +664,11 @@ async function closeDuplicateTabs(tabs, settings) {
   }
 }
 
-async function ensureDocsGroup(protectedWindowId = null, settings) {
-  if (!settings.docsGrouping) {
-    return;
-  }
-
-  const windows = await chrome.windows.getAll({ populate: true, windowTypes: ["normal"] });
-  const docsTabs = windows
-    .flatMap((window) => window.tabs ?? [])
-    .filter(
-      (tab) =>
-        typeof tab.id === "number" &&
-        typeof tab.url === "string" &&
-        isDocsUrl(tab.url) &&
-        (protectedWindowId === null || tab.windowId !== protectedWindowId)
-    );
-
-  if (docsTabs.length === 0) {
-    return;
-  }
-
-  const docsTabIds = docsTabs.map((tab) => tab.id);
-  const existingGroupIds = [...new Set(docsTabs.map((tab) => tab.groupId).filter((groupId) => typeof groupId === "number" && groupId >= 0))];
-
-  let docsGroupId = null;
-  let docsGroupCollapsed = false;
-
-  for (const groupId of existingGroupIds) {
-    try {
-      const group = await chrome.tabGroups.get(groupId);
-      if (group.title === DOCS_GROUP_TITLE) {
-        docsGroupId = groupId;
-        docsGroupCollapsed = group.collapsed;
-        break;
-      }
-    } catch (error) {
-      console.warn("Tabcoach group lookup failed", groupId, error);
-    }
-  }
-
-  if (docsGroupId === null) {
-    docsGroupId = await withTransientRetry(() => chrome.tabs.group({ tabIds: docsTabIds }), "docs-group-create");
-  } else {
-    await withTransientRetry(() => chrome.tabs.group({ groupId: docsGroupId, tabIds: docsTabIds }), "docs-group-assign");
-  }
-
-  await withTransientRetry(
-    () =>
-      chrome.tabGroups.update(docsGroupId, {
-        title: DOCS_GROUP_TITLE,
-        color: DOCS_GROUP_COLOR,
-        collapsed: docsGroupCollapsed
-      }),
-    "docs-group-update"
-  );
-}
-
 async function pushSnapshot(reason) {
   try {
     const settings = await getSettings();
-    const protectedWindowId = await getFocusedWindowId();
     const tabs = await collectTabs();
     await closeDuplicateTabs(tabs, settings);
-    await ensureDocsGroup(protectedWindowId, settings);
-    const refreshedTabs = await collectTabs();
     const response = await fetchLocalServer("sync", SYNC_ENDPOINT, {
       method: "POST",
       headers: {
@@ -756,7 +677,7 @@ async function pushSnapshot(reason) {
       body: JSON.stringify({
         source: `chrome-extension:${reason}`,
         capturedAt: new Date().toISOString(),
-        tabs: refreshedTabs
+        tabs
       })
     }, settings);
 
@@ -772,179 +693,6 @@ async function pushSnapshot(reason) {
     console.error("Tabcoach sync failed", error);
     await setServerHealth(false, getErrorMessage(error));
   }
-}
-
-async function showTtsSuccessFeedback(selectedText) {
-  await chrome.action.setBadgeBackgroundColor({ color: "#1d4ed8" });
-  await chrome.action.setBadgeText({ text: "TTS" });
-
-  if (badgeResetTimer !== null) {
-    clearTimeout(badgeResetTimer);
-  }
-
-  badgeResetTimer = setTimeout(() => {
-    badgeResetTimer = null;
-    void restoreServerHealthBadge();
-  }, TTS_SUCCESS_BADGE_MS);
-
-  const notificationText = "Text-to-speech started";
-
-  try {
-    const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-
-    if (activeTab?.id) {
-      await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        func: (message) => {
-          const getSelectionAnchor = () => {
-            const selection = window.getSelection();
-            if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
-              const range = selection.getRangeAt(0);
-              const rects = range.getClientRects();
-              const rect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
-              if (rect && (rect.width > 0 || rect.height > 0)) {
-                return {
-                  left: rect.left + window.scrollX,
-                  top: rect.bottom + window.scrollY
-                };
-              }
-            }
-
-            const activeElement = document.activeElement;
-            if (
-              activeElement instanceof HTMLTextAreaElement ||
-              (activeElement instanceof HTMLInputElement &&
-                ["text", "search", "url", "tel", "password"].includes(activeElement.type))
-            ) {
-              const rect = activeElement.getBoundingClientRect();
-              return {
-                left: rect.left + window.scrollX,
-                top: rect.bottom + window.scrollY
-              };
-            }
-
-            return null;
-          };
-
-          const existingToast = document.getElementById("__tabcoach_tts_toast");
-          if (existingToast) {
-            existingToast.remove();
-          }
-
-          const anchor = getSelectionAnchor();
-          const margin = 12;
-          const toastWidth = 440;
-          const horizontalOffset = 48;
-          const toast = document.createElement("div");
-          toast.id = "__tabcoach_tts_toast";
-          toast.textContent = message;
-          Object.assign(toast.style, {
-            position: "fixed",
-            top: anchor
-              ? `${Math.max(margin, anchor.top - window.scrollY + 18)}px`
-              : "20px",
-            left: anchor
-              ? `${Math.max(
-                  margin,
-                  Math.min(
-                    anchor.left - window.scrollX + horizontalOffset,
-                    window.innerWidth - toastWidth - margin
-                  )
-                )}px`
-              : "",
-            right: anchor ? "" : "20px",
-            zIndex: "2147483647",
-            maxWidth: `${toastWidth}px`,
-            padding: "18px 24px",
-            borderRadius: "14px",
-            background: "rgba(17, 24, 39, 0.96)",
-            color: "#ffffff",
-            font: "18px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-            boxShadow: "0 12px 32px rgba(0, 0, 0, 0.28)",
-            whiteSpace: "pre-wrap",
-            pointerEvents: "none",
-            textAlign: "center"
-          });
-
-          document.documentElement.appendChild(toast);
-          setTimeout(() => {
-            toast.remove();
-          }, 3000);
-        },
-        args: [notificationText]
-      });
-      return;
-    }
-  } catch (error) {
-    console.warn("Tabcoach toast injection failed", error);
-  }
-
-  try {
-    await chrome.notifications.create({
-      type: "basic",
-      iconUrl: chrome.runtime.getURL("icon-128.png"),
-      title: "Tabcoach TTS started",
-      message: notificationText
-    });
-  } catch (error) {
-    console.warn("Tabcoach notification failed", error);
-  }
-}
-
-async function getSelectedTextFromTab(tabId) {
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      const activeElement = document.activeElement;
-
-      if (
-        activeElement instanceof HTMLTextAreaElement ||
-        (activeElement instanceof HTMLInputElement &&
-          ["text", "search", "url", "tel", "password"].includes(activeElement.type))
-      ) {
-        const start = activeElement.selectionStart ?? 0;
-        const end = activeElement.selectionEnd ?? 0;
-        return activeElement.value.slice(start, end).trim();
-      }
-
-      return window.getSelection()?.toString().trim() ?? "";
-    }
-  });
-
-  return typeof result?.result === "string" ? result.result.trim() : "";
-}
-
-async function sendSelectionToTts() {
-  const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-
-  if (!activeTab?.id) {
-    throw new Error("No active tab");
-  }
-
-  const selectedText = await getSelectedTextFromTab(activeTab.id);
-  if (!selectedText) {
-    throw new Error("No selected text found");
-  }
-
-  const settings = await getSettings();
-  const response = await fetchLocalServer("tts-selection", TTS_SELECTION_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      source: "chrome-extension:command",
-      text: selectedText,
-      pageTitle: activeTab.title ?? "",
-      pageUrl: activeTab.url ?? ""
-    })
-  }, settings);
-
-  if (!response.ok) {
-    throw new Error(`TTS server returned ${response.status}`);
-  }
-
-  await showTtsSuccessFeedback(selectedText);
 }
 
 function getTabTitleKey(title) {
@@ -979,10 +727,6 @@ function inferTabTitleHint(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
     const hostname = parsed.hostname.replace(/^www\./, "");
-    const jiraTicket = parsed.pathname.match(/\/browse\/([A-Z][A-Z0-9]+-\d+)/);
-    if (jiraTicket) {
-      return jiraTicket[1];
-    }
 
     const pullRequest = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
     if (pullRequest) {
@@ -2649,13 +2393,6 @@ chrome.commands.onCommand.addListener((command, tab) => {
       await openTabSwitcherPopup();
     })().catch((error) => {
       console.error("Tabcoach tab switcher failed", error);
-    });
-    return;
-  }
-
-  if (command === "speak-selection") {
-    void sendSelectionToTts().catch((error) => {
-      console.error("Tabcoach TTS selection failed", error);
     });
     return;
   }

@@ -70,8 +70,7 @@ button {
   color: #9ca3af;
 }
 
-.sort-controls,
-.selection-actions {
+.sort-controls {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -79,7 +78,6 @@ button {
 }
 
 .sort-button,
-.toolbar-action-button,
 .new-tab-button,
 .close-button,
 .icon-button {
@@ -91,13 +89,11 @@ button {
 }
 
 .sort-button,
-.toolbar-action-button,
 .close-button {
   height: 34px;
 }
 
 .sort-button,
-.toolbar-action-button,
 .close-button {
   width: 34px;
   flex: 0 0 auto;
@@ -107,10 +103,6 @@ button {
 
 .sort-button {
   font-size: 20px;
-}
-
-.toolbar-action-button {
-  font-size: 19px;
 }
 
 .close-button {
@@ -130,11 +122,6 @@ button {
 .sort-button[aria-pressed="true"] {
   background: #6366f1;
   border-color: rgba(199, 210, 254, 0.78);
-}
-
-.toolbar-action-button:disabled {
-  cursor: default;
-  opacity: 0.42;
 }
 
 .list {
@@ -255,7 +242,7 @@ body:not(.window-blurred) .section-header-clickable:hover {
 
 .row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) minmax(58px, auto) 34px 34px 34px;
+  grid-template-columns: 40px minmax(0, 1fr) minmax(58px, auto) 34px 34px;
   align-items: center;
   gap: 12px;
   min-height: 58px;
@@ -420,6 +407,57 @@ body:not(.window-blurred) .row:hover {
   background: rgba(248, 113, 113, 0.16);
   border-color: rgba(248, 113, 113, 0.42);
   color: #fecaca;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  width: 196px;
+  padding: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.38);
+  border-radius: 8px;
+  background: #0f172a;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
+}
+
+.context-menu-item {
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #f9fafb;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 30px;
+  text-align: left;
+}
+
+.context-menu-item:hover:not(:disabled),
+.context-menu-item:focus-visible {
+  background: rgba(96, 165, 250, 0.16);
+  border-color: rgba(96, 165, 250, 0.36);
+  outline: none;
+}
+
+.context-menu-item[data-tone="danger"]:hover:not(:disabled),
+.context-menu-item[data-tone="danger"]:focus-visible {
+  background: rgba(248, 113, 113, 0.16);
+  border-color: rgba(248, 113, 113, 0.42);
+  color: #fecaca;
+}
+
+.context-menu-item:disabled {
+  cursor: default;
+  opacity: 0.44;
+}
+
+.context-menu-separator {
+  height: 1px;
+  margin: 6px 4px;
+  background: rgba(148, 163, 184, 0.24);
 }
 
 .drop-before {
