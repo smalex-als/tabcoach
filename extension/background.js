@@ -38,8 +38,7 @@ const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
 const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
-const BOOKMARK_GROUP_SNAPSHOT_MESSAGE = "tabcoach:bookmark-group-snapshot";
-const OPEN_GROUP_SNAPSHOT_BOOKMARKS_MESSAGE = "tabcoach:open-group-snapshot-bookmarks";
+const OPEN_GROUP_BOOKMARK_MESSAGE = "tabcoach:open-group-bookmark";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
@@ -810,16 +809,6 @@ function getBookmarkSnapshotFolderTitle(baseTitle) {
   return normalizeBookmarkFolderTitle(baseTitle);
 }
 
-async function collectGroupSnapshotTitles() {
-  const rootFolderId = await findBookmarkFolderId();
-  if (!rootFolderId) {
-    return new Set();
-  }
-
-  const children = await chrome.bookmarks.getChildren(rootFolderId);
-  return new Set(children.filter((bookmark) => !bookmark.url).map((bookmark) => bookmark.title));
-}
-
 async function collectBookmarkedTabIds(tabs, tabGroupsById) {
   const bookmarkedTabIds = new Set();
   const rootFolderId = await findBookmarkFolderId();
@@ -867,14 +856,11 @@ async function collectTabSwitcherItems(windowId) {
   const currentWindowTabs = await chrome.tabs.query({ windowId });
   const tabGroups = await chrome.tabGroups.query({ windowId });
   const tabGroupsById = new Map(tabGroups.map((group) => [group.id, group]));
-  const snapshotFolderTitles = await collectGroupSnapshotTitles();
   const bookmarkedTabIds = await collectBookmarkedTabIds(currentWindowTabs, tabGroupsById);
+  const closedBookmarksByGroupId = await collectClosedBookmarksByGroupId(tabGroups);
 
   const items = currentWindowTabs.map((tab) => {
     const group = typeof tab.groupId === "number" && tab.groupId >= 0 ? tabGroupsById.get(tab.groupId) : null;
-    const groupSnapshotExists = group
-      ? snapshotFolderTitles.has(getBookmarkSnapshotFolderTitle(group.title || "Unnamed group"))
-      : false;
     const item = toTabSwitcherItem(tab, group);
 
     return {
@@ -882,7 +868,7 @@ async function collectTabSwitcherItems(windowId) {
       group: item.group
         ? {
             ...item.group,
-            snapshotExists: groupSnapshotExists
+            closedBookmarks: group ? closedBookmarksByGroupId.get(group.id) ?? [] : []
           }
         : null,
       bookmarked: Boolean(typeof tab.id === "number" && bookmarkedTabIds.has(tab.id))
@@ -1819,6 +1805,50 @@ async function findBookmarkSnapshotFolder(parentId, baseTitle) {
   return children.find((bookmark) => bookmark.title === snapshotTitle && !bookmark.url) ?? null;
 }
 
+async function getGroupBookmarkFolder(groupTitle) {
+  const rootFolderId = await findBookmarkFolderId();
+  if (!rootFolderId) {
+    return null;
+  }
+
+  return findBookmarkSnapshotFolder(rootFolderId, groupTitle || "Unnamed group");
+}
+
+function getOpenNormalizedUrls(tabs) {
+  return new Set(
+    tabs
+      .map((tab) => (typeof tab.url === "string" && tab.url ? normalizeUrl(tab.url) : ""))
+      .filter(Boolean)
+  );
+}
+
+async function getClosedBookmarksForGroup(group, openNormalizedUrls) {
+  const bookmarkFolder = await getGroupBookmarkFolder(group.title || "Unnamed group");
+  if (!bookmarkFolder?.id) {
+    return [];
+  }
+
+  const bookmarks = await chrome.bookmarks.getChildren(bookmarkFolder.id);
+  return bookmarks
+    .filter((bookmark) => typeof bookmark.url === "string" && bookmark.url.length > 0)
+    .filter((bookmark) => !openNormalizedUrls.has(normalizeUrl(bookmark.url)))
+    .map((bookmark, index) => ({
+      id: bookmark.id,
+      title: bookmark.title || bookmark.url,
+      url: bookmark.url,
+      index
+    }));
+}
+
+async function collectClosedBookmarksByGroupId(groups) {
+  const openTabs = await chrome.tabs.query({});
+  const openNormalizedUrls = getOpenNormalizedUrls(openTabs);
+  const entries = await Promise.all(
+    groups.map(async (group) => [group.id, await getClosedBookmarksForGroup(group, openNormalizedUrls)])
+  );
+  return new Map(entries);
+}
+
 async function renameBookmarkSnapshotFolder(previousTitle, nextTitle) {
   const previousFolderTitle = getBookmarkSnapshotFolderTitle(previousTitle);
   const nextFolderTitle = getBookmarkSnapshotFolderTitle(nextTitle);
@@ -1839,7 +1869,7 @@ async function renameBookmarkSnapshotFolder(previousTitle, nextTitle) {
   await chrome.bookmarks.update(existingFolder.id, { title: nextFolderTitle });
 }
 
-async function bookmarkGroupSnapshotFromSwitcher(groupId, context = {}) {
+async function getValidatedGroupInSwitcherWindow(groupId, context = {}) {
   if (typeof groupId !== "number" || !Number.isInteger(groupId) || groupId < 0) {
     throw new Error("Invalid group id");
   }
@@ -1851,91 +1881,57 @@ async function bookmarkGroupSnapshotFromSwitcher(groupId, context = {}) {
 
   const group = await chrome.tabGroups.get(groupId);
   if (group.windowId !== windowId) {
-    throw new Error("Cannot bookmark a group outside the current window");
+    throw new Error("Cannot use a group outside the current window");
   }
 
-  const groupTabs = (await chrome.tabs.query({ windowId }))
-    .filter((tab) => tab.groupId === groupId && typeof tab.url === "string" && tab.url.length > 0)
-    .sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
-
-  if (groupTabs.length === 0) {
-    throw new Error("No bookmarkable tabs in this group");
-  }
-
-  const rootFolderId = await getOrCreateBookmarkFolder();
-  const snapshotFolder = await createBookmarkSnapshotFolder(rootFolderId, group.title || "Unnamed group");
-  const existingSnapshotBookmarks = await chrome.bookmarks.getChildren(snapshotFolder.id);
-  const existingSnapshotUrls = new Set(
-    existingSnapshotBookmarks
-      .map((bookmark) => bookmark.url)
-      .filter((url) => typeof url === "string" && url.length > 0)
-  );
-  let createdCount = 0;
-
-  for (const tab of groupTabs) {
-    if (existingSnapshotUrls.has(tab.url)) {
-      continue;
-    }
-
-    await chrome.bookmarks.create({
-      parentId: snapshotFolder.id,
-      title: tab.title || tab.url,
-      url: tab.url
-    });
-    existingSnapshotUrls.add(tab.url);
-    createdCount += 1;
-  }
-
-  return {
-    folderId: snapshotFolder.id,
-    title: snapshotFolder.title,
-    count: groupTabs.length,
-    createdCount
-  };
+  return { group, windowId };
 }
 
-async function openGroupSnapshotBookmarksFromSwitcher(groupId, context = {}) {
-  if (typeof groupId !== "number" || !Number.isInteger(groupId) || groupId < 0) {
-    throw new Error("Invalid group id");
+async function openGroupBookmarkFromSwitcher(groupId, bookmarkId, insertOffset = 0, context = {}) {
+  if (typeof bookmarkId !== "string" || bookmarkId.length === 0) {
+    throw new Error("Invalid bookmark id");
   }
 
-  const windowId = getSwitcherContextWindowId(context);
-  if (typeof windowId !== "number") {
-    throw new Error("Invalid window id");
+  const { group, windowId } = await getValidatedGroupInSwitcherWindow(groupId, context);
+  const bookmarkFolder = await getGroupBookmarkFolder(group.title || "Unnamed group");
+  if (!bookmarkFolder?.id) {
+    throw new Error("No bookmark folder for this group");
   }
 
-  const group = await chrome.tabGroups.get(groupId);
-  if (group.windowId !== windowId) {
-    throw new Error("Cannot open bookmarks for a group outside the current window");
+  const bookmarks = await chrome.bookmarks.getChildren(bookmarkFolder.id);
+  const bookmark = bookmarks.find((item) => item.id === bookmarkId && typeof item.url === "string" && item.url.length > 0);
+  if (!bookmark?.url) {
+    throw new Error("Bookmark not found in this group");
   }
 
-  const rootFolderId = await getOrCreateBookmarkFolder();
-  let snapshotFolder = await findBookmarkSnapshotFolder(rootFolderId, group.title || "Unnamed group");
-  if (!snapshotFolder?.id) {
-    const snapshot = await bookmarkGroupSnapshotFromSwitcher(groupId, context);
-    snapshotFolder = {
-      id: snapshot.folderId,
-      title: snapshot.title
-    };
-  }
-
-  const bookmarkManagerTab = await chrome.tabs.create({
+  const windowTabs = await chrome.tabs.query({ windowId });
+  const groupTabs = windowTabs
+    .filter((tab) => tab.groupId === groupId)
+    .sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+  const safeInsertOffset = Number.isInteger(insertOffset) && insertOffset >= 0 ? insertOffset : 0;
+  const lastGroupIndex = groupTabs.length > 0
+    ? Math.max(...groupTabs.map((tab) => (typeof tab.index === "number" ? tab.index : 0)))
+    : windowTabs.length - 1;
+  const insertIndex = Math.min(windowTabs.length, lastGroupIndex + 1 + safeInsertOffset);
+  const tab = await chrome.tabs.create({
     windowId,
-    url: `chrome://bookmarks/?id=${encodeURIComponent(snapshotFolder.id)}`,
+    index: insertIndex,
+    url: bookmark.url,
     active: true
   });
+  markTabCreated(tab.id);
 
-  if (typeof bookmarkManagerTab.id === "number") {
-    try {
-      await chrome.tabs.group({ groupId, tabIds: [bookmarkManagerTab.id] });
-    } catch (error) {
-      console.warn("Tabcoach could not add bookmark manager tab to source group", error);
-    }
+  if (typeof tab.id === "number") {
+    await chrome.tabs.group({ groupId, tabIds: [tab.id] });
+  }
+
+  if (typeof tab.windowId === "number") {
+    await chrome.windows.update(tab.windowId, { focused: true });
   }
 
   return {
-    folderId: snapshotFolder.id,
-    title: snapshotFolder.title
+    tab: tab ? normalizeTab(tab) : null,
+    tabs: await collectTabSwitcherItems(windowId)
   };
 }
 
@@ -2371,26 +2367,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === BOOKMARK_GROUP_SNAPSHOT_MESSAGE) {
-    void bookmarkGroupSnapshotFromSwitcher(message.groupId, switcherContext)
-      .then((snapshot) => {
-        sendResponse({ ok: true, snapshot });
+  if (message?.type === OPEN_GROUP_BOOKMARK_MESSAGE) {
+    void openGroupBookmarkFromSwitcher(message.groupId, message.bookmarkId, message.insertOffset, switcherContext)
+      .then((result) => {
+        sendResponse({ ok: true, ...result });
       })
       .catch((error) => {
-        console.error("Tabcoach group bookmark snapshot failed", error);
-        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
-      });
-
-    return true;
-  }
-
-  if (message?.type === OPEN_GROUP_SNAPSHOT_BOOKMARKS_MESSAGE) {
-    void openGroupSnapshotBookmarksFromSwitcher(message.groupId, switcherContext)
-      .then((snapshot) => {
-        sendResponse({ ok: true, snapshot });
-      })
-      .catch((error) => {
-        console.error("Tabcoach group bookmark snapshot open failed", error);
+        console.error("Tabcoach group bookmark open failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

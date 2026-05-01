@@ -12,8 +12,7 @@ const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
 const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
-const BOOKMARK_GROUP_SNAPSHOT_MESSAGE = "tabcoach:bookmark-group-snapshot";
-const OPEN_GROUP_SNAPSHOT_BOOKMARKS_MESSAGE = "tabcoach:open-group-snapshot-bookmarks";
+const OPEN_GROUP_BOOKMARK_MESSAGE = "tabcoach:open-group-bookmark";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
@@ -78,6 +77,7 @@ let refreshTimer = null;
 let suppressNextRowClick = false;
 let pointerDownRowIndex = null;
 let contextMenu = null;
+const expandedBookmarkGroupIds = new Set();
 
 function sendMessage(message) {
   return chrome.runtime.sendMessage({ windowId, ...message });
@@ -301,6 +301,26 @@ function getSelectedGroupId() {
   return Number.isInteger(groupId) && groupId >= 0 ? groupId : null;
 }
 
+function getSelectedBookmarkTarget() {
+  const row = rows[selectedIndex];
+  if (row?.dataset.tabcoachRowType !== "bookmark") {
+    return null;
+  }
+
+  const groupId = Number(row.dataset.tabcoachGroupId);
+  const bookmarkId = row.dataset.tabcoachBookmarkId;
+  const insertOffset = Number(row.dataset.tabcoachBookmarkIndex);
+  if (!Number.isInteger(groupId) || groupId < 0 || !bookmarkId) {
+    return null;
+  }
+
+  return {
+    groupId,
+    bookmarkId,
+    insertOffset: Number.isInteger(insertOffset) && insertOffset >= 0 ? insertOffset : 0
+  };
+}
+
 function getRowIndexForTabId(tabId) {
   const rowIndex = rows.findIndex((row) => Number(row.dataset.tabcoachTabId) === tabId);
   return rowIndex >= 0 ? rowIndex : 0;
@@ -420,29 +440,22 @@ async function renameGroup(groupId, currentTitle) {
   applyRowState();
 }
 
-async function bookmarkGroupSnapshot(groupId, button = null) {
-  if (typeof groupId !== "number") {
+async function openGroupBookmark(groupId, bookmarkId, insertOffset = 0) {
+  const response = await sendMessage({ type: OPEN_GROUP_BOOKMARK_MESSAGE, groupId, bookmarkId, insertOffset }).then((result) =>
+    assertResponse(result, "Open bookmark failed")
+  );
+
+  if (!keepOpenAfterSwitch) {
+    window.close();
     return;
   }
 
-  const response = await sendMessage({ type: BOOKMARK_GROUP_SNAPSHOT_MESSAGE, groupId }).then((result) =>
-    assertResponse(result, "Group snapshot failed")
-  );
-  if (button) {
-    button.textContent = "★";
-    button.dataset.snapshotExists = "true";
-  }
-  showShortcutNotification(`Saved ${response.snapshot?.createdCount ?? 0} new tabs`);
-}
-
-async function openGroupSnapshotBookmarks(groupId) {
-  if (typeof groupId !== "number") {
-    return;
-  }
-
-  await sendMessage({ type: OPEN_GROUP_SNAPSHOT_BOOKMARKS_MESSAGE, groupId }).then((result) =>
-    assertResponse(result, "Open group bookmarks failed")
-  );
+  tabs = dedupeTabsById(response.tabs);
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabOrGroup(response.tab?.id);
+  applyRowState();
 }
 
 async function createGroupForTab(tabId, currentTitle = "") {
@@ -574,6 +587,12 @@ function showShortcutNotification(message) {
 }
 
 async function switchToSelectedTab() {
+  const bookmarkTarget = getSelectedBookmarkTarget();
+  if (bookmarkTarget) {
+    await openGroupBookmark(bookmarkTarget.groupId, bookmarkTarget.bookmarkId, bookmarkTarget.insertOffset);
+    return;
+  }
+
   const tabId = getSelectedTabId();
   if (tabId === null) {
     const groupId = getSelectedGroupId();
@@ -898,6 +917,7 @@ function createButton(className, text, label, onClick) {
     Promise.resolve(onClick(button)).catch(reportActionError);
   });
   button.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
     event.stopPropagation();
   });
   button.addEventListener("dragstart", (event) => {
@@ -1029,6 +1049,96 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
   menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
 }
 
+function renderBookmarkRow(bookmark, group) {
+  const row = document.createElement("div");
+  row.className = "row bookmark-row";
+  row.setAttribute("role", "option");
+  row.tabIndex = -1;
+  row.dataset.tabcoachRowType = "bookmark";
+  row.dataset.tabcoachBookmarkId = String(bookmark.id ?? "");
+  row.dataset.tabcoachBookmarkIndex = String(bookmark.index ?? 0);
+  row.dataset.tabcoachGroupId = String(group.id);
+  row.dataset.active = "false";
+  row.title = "Open saved bookmark";
+
+  const rowIndex = rows.length;
+  row.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    selectedIndex = rowIndex;
+    pointerDownRowIndex = rowIndex;
+    applyRowState();
+  });
+  row.addEventListener("click", () => {
+    pointerDownRowIndex = null;
+    selectedIndex = rowIndex;
+    void openGroupBookmark(group.id, bookmark.id, bookmark.index ?? 0).catch(reportActionError);
+  });
+
+  const icon = document.createElement("div");
+  icon.className = "favicon bookmark-favicon";
+  icon.textContent = "★";
+
+  const text = document.createElement("div");
+  text.className = "tab-text";
+
+  const tabTitle = document.createElement("div");
+  tabTitle.className = "tab-title";
+  const tabTitleLabel = document.createElement("span");
+  tabTitleLabel.className = "tab-title-label";
+  tabTitleLabel.textContent = bookmark.title || bookmark.url || "Untitled bookmark";
+  tabTitle.appendChild(tabTitleLabel);
+
+  const tabUrl = document.createElement("div");
+  tabUrl.className = "tab-url";
+  tabUrl.textContent = formatUrl(bookmark.url);
+
+  const status = document.createElement("div");
+  status.className = "status bookmark-status";
+  status.textContent = "Saved";
+
+  text.append(tabTitle, tabUrl);
+  row.append(icon, text, status);
+  rows.push(row);
+  list.appendChild(row);
+}
+
+function renderGroupBookmarkRows(group) {
+  const bookmarks = Array.isArray(group.closedBookmarks) ? group.closedBookmarks : [];
+  bookmarks.forEach((bookmark) => {
+    renderBookmarkRow(bookmark, group);
+  });
+}
+
+async function toggleGroupBookmarkRows(group) {
+  if (!group?.id) {
+    return;
+  }
+
+  const bookmarks = Array.isArray(group.closedBookmarks) ? group.closedBookmarks : [];
+  if (bookmarks.length === 0) {
+    showShortcutNotification("No unopened bookmarks");
+    return;
+  }
+
+  const selectedGroupId = group.id;
+  if (expandedBookmarkGroupIds.has(selectedGroupId)) {
+    expandedBookmarkGroupIds.delete(selectedGroupId);
+  } else {
+    expandedBookmarkGroupIds.add(selectedGroupId);
+    if (group.collapsed) {
+      await setGroupCollapsed(selectedGroupId, false);
+      return;
+    }
+  }
+
+  renderTabs();
+  selectedIndex = getRowIndexForGroupId(selectedGroupId);
+  applyRowState();
+}
+
 function renderTabs({ scrollBlock = "nearest" } = {}) {
   closeContextMenu();
   rows = [];
@@ -1056,8 +1166,8 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
   let lastSectionKey = null;
 
   visibleTabs.forEach((tab, index) => {
+    const sectionKey = showGroupSections ? (tab.group ? `group:${tab.group.id}` : "ungrouped") : null;
     if (showGroupSections) {
-      const sectionKey = tab.group ? `group:${tab.group.id}` : "ungrouped";
       if (sectionKey !== lastSectionKey) {
         const sectionHeader = document.createElement("div");
         sectionHeader.className = "section-header";
@@ -1074,26 +1184,20 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
 
         sectionHeader.append(swatch, sectionTitle);
         if (tab.group) {
-          const snapshotButton = createButton(
-            "group-snapshot",
-            tab.group.snapshotExists ? "★" : "☆",
-            `Bookmark snapshot of ${tab.group.title || "Unnamed group"}`,
-            (button) => bookmarkGroupSnapshot(tab.group.id, button)
+          const bookmarkRowsButton = createButton(
+            "group-bookmarks",
+            "☆…",
+            `Toggle unopened bookmarks for ${tab.group.title || "Unnamed group"}`,
+            () => toggleGroupBookmarkRows(tab.group)
           );
-          snapshotButton.dataset.snapshotExists = String(Boolean(tab.group.snapshotExists));
-          const openSnapshotButton = createButton(
-            "group-snapshot-open",
-            "↗",
-            `Open today's bookmark snapshot for ${tab.group.title || "Unnamed group"}`,
-            () => openGroupSnapshotBookmarks(tab.group.id)
-          );
+          bookmarkRowsButton.setAttribute("aria-pressed", String(expandedBookmarkGroupIds.has(tab.group.id)));
           const renameButton = createButton(
             "group-rename",
             "✎",
             `Rename ${tab.group.title || "Unnamed group"}`,
             () => renameGroup(tab.group.id, tab.group.title || "")
           );
-          sectionHeader.append(snapshotButton, openSnapshotButton, renameButton);
+          sectionHeader.append(bookmarkRowsButton, renameButton);
           sectionHeader.classList.add("section-header-clickable");
           if (tab.group.collapsed) {
             sectionHeader.classList.add("section-header-collapsed");
@@ -1277,6 +1381,14 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     rows.push(row);
     tabRows.push(row);
     list.appendChild(row);
+
+    if (showGroupSections && tab.group && expandedBookmarkGroupIds.has(tab.group.id)) {
+      const nextTab = visibleTabs[index + 1];
+      const nextSectionKey = nextTab?.group ? `group:${nextTab.group.id}` : nextTab ? "ungrouped" : null;
+      if (nextSectionKey !== sectionKey) {
+        renderGroupBookmarkRows(tab.group);
+      }
+    }
   });
 
   applyRowState(scrollBlock);

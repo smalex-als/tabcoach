@@ -268,6 +268,20 @@ body:not(.window-blurred) .row:hover {
   border-color: rgba(199, 210, 254, 0.82);
 }
 
+.bookmark-row {
+  background: rgba(15, 23, 42, 0.3);
+  cursor: pointer;
+}
+
+.bookmark-row .tab-title {
+  color: #e0f2fe;
+}
+
+.bookmark-row .tab-url,
+.bookmark-status {
+  color: #93c5fd;
+}
+
 .favicon {
   width: 32px;
   height: 32px;
@@ -280,6 +294,15 @@ body:not(.window-blurred) .row:hover {
   width: 32px;
   height: 32px;
   display: block;
+}
+
+.bookmark-favicon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #facc15;
+  font-size: 18px;
+  line-height: 1;
 }
 
 .tab-text {
@@ -369,19 +392,26 @@ body:not(.window-blurred) .row:hover {
 }
 
 .icon-button.bookmark,
-.icon-button.group-snapshot,
-.icon-button.group-snapshot-open,
+.icon-button.group-bookmarks,
 .icon-button.group-rename,
 .icon-button.close {
   font-size: 22px;
 }
 
-.icon-button.group-snapshot {
-  color: #d1d5db;
+.icon-button.group-bookmarks[aria-pressed="true"] {
+  background: rgba(96, 165, 250, 0.18);
+  border-color: rgba(96, 165, 250, 0.48);
+  color: #bfdbfe;
 }
 
-.icon-button.group-snapshot[data-snapshot-exists="true"] {
-  color: #facc15;
+.icon-button.group-bookmarks {
+  width: 36px;
+  color: #d1d5db;
+  font-size: 16px;
+}
+
+.icon-button.group-bookmarks[aria-pressed="true"] {
+  color: #bfdbfe;
 }
 
 .icon-button:hover {
