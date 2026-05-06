@@ -32,6 +32,7 @@ const groupColors = {
   cyan: "#22d3ee",
   orange: "#fb923c"
 };
+const ungroupedColor = "#6b7280";
 const FALLBACK_DESKTOP_APPS = [{ id: "iterm", label: "iTerm" }];
 const TRACKING_PARAMS = new Set([
   "fbclid",
@@ -260,18 +261,8 @@ function getTabById(tabId) {
   return tabs.find((tab) => tab.id === tabId) ?? null;
 }
 
-function getAvailableGroups() {
-  const groupsById = new Map();
-
-  tabs.forEach((tab) => {
-    if (tab.group?.id !== undefined && !groupsById.has(tab.group.id)) {
-      groupsById.set(tab.group.id, tab.group);
-    }
-  });
-
-  return [...groupsById.values()].sort((left, right) =>
-    (left.title || "Unnamed group").localeCompare(right.title || "Unnamed group")
-  );
+function getGroupSwatchColor(group) {
+  return groupColors[group?.color] ?? groupColors.grey;
 }
 
 function applyRowState(scrollBlock = "nearest") {
@@ -480,46 +471,56 @@ async function createGroupForTab(tabId, currentTitle = "") {
   applyRowState();
 }
 
-async function moveTabToGroup(tab) {
-  if (!tab?.id || tab.pinned) {
-    return;
+function getMoveTabGroupOptions(tab) {
+  if (typeof tab?.id !== "number" || tab.pinned) {
+    return [];
   }
 
-  const groups = getAvailableGroups();
   const options = [];
+  const seenGroupIds = new Set();
+  let hasUngroupOption = false;
 
-  if (tab.group) {
-    options.push({ groupId: -1, label: "Ungroup" });
-  }
+  const addUngroupOption = () => {
+    if (!tab.group || hasUngroupOption) {
+      return;
+    }
 
-  groups
-    .filter((group) => group.id !== tab.group?.id)
-    .forEach((group) => {
-      options.push({
-        groupId: group.id,
-        label: group.title || "Unnamed group"
-      });
+    options.push({ groupId: -1, label: "Ungroup", color: ungroupedColor });
+    hasUngroupOption = true;
+  };
+
+  tabs.forEach((item) => {
+    if (!item.group) {
+      addUngroupOption();
+      return;
+    }
+
+    if (item.group.id === tab.group?.id || seenGroupIds.has(item.group.id)) {
+      return;
+    }
+
+    seenGroupIds.add(item.group.id);
+    options.push({
+      groupId: item.group.id,
+      label: item.group.title || "Unnamed group",
+      color: getGroupSwatchColor(item.group)
     });
+  });
 
-  if (options.length === 0) {
-    showShortcutNotification("No groups available");
-    return;
+  if (tab.group && !hasUngroupOption) {
+    options.unshift({ groupId: -1, label: "Ungroup", color: ungroupedColor });
   }
 
-  const menuText = options.map((option, index) => `${index + 1}. ${option.label}`).join("\n");
-  const rawChoice = window.prompt(`Move selected tab to:\n${menuText}`, "1");
-  if (rawChoice === null) {
-    return;
-  }
+  return options;
+}
 
-  const option = options[Number(rawChoice.trim()) - 1];
-  if (!option) {
-    showShortcutNotification("Invalid group choice");
+async function moveTabToGroup(tab, groupId) {
+  if (typeof tab?.id !== "number" || tab.pinned || typeof groupId !== "number") {
     return;
   }
 
   const selectedTabId = tab.id;
-  const response = await sendMessage({ type: SET_TAB_GROUP_MESSAGE, tabId: tab.id, groupId: option.groupId }).then((result) =>
+  const response = await sendMessage({ type: SET_TAB_GROUP_MESSAGE, tabId: tab.id, groupId }).then((result) =>
     assertResponse(result, "Tab group move failed")
   );
   tabs = dedupeTabsById(response.tabs);
@@ -932,7 +933,7 @@ function canMoveTabToGroup(tab) {
     return false;
   }
 
-  return Boolean(getAvailableGroups().some((group) => group.id !== tab.group?.id) || tab.group);
+  return getMoveTabGroupOptions(tab).length > 0;
 }
 
 function closeContextMenu() {
@@ -945,7 +946,9 @@ function focusContextMenuItem(offset) {
     return;
   }
 
-  const items = [...contextMenu.querySelectorAll(".context-menu-item:not(:disabled)")];
+  const items = [...contextMenu.querySelectorAll(".context-menu-item:not(:disabled)")].filter(
+    (item) => item.getClientRects().length > 0
+  );
   if (items.length === 0) {
     return;
   }
@@ -962,13 +965,25 @@ function createContextMenuSeparator() {
   return separator;
 }
 
-function createContextMenuItem(label, onClick, { disabled = false, tone = "" } = {}) {
+function createContextMenuItem(label, onClick, { disabled = false, tone = "", swatchColor = "" } = {}) {
   const item = document.createElement("button");
   item.type = "button";
   item.className = "context-menu-item";
   item.setAttribute("role", "menuitem");
   item.disabled = disabled;
-  item.textContent = label;
+  if (swatchColor) {
+    const swatch = document.createElement("span");
+    swatch.className = "context-menu-swatch";
+    swatch.style.background = swatchColor;
+
+    const text = document.createElement("span");
+    text.className = "context-menu-label";
+    text.textContent = label;
+
+    item.append(swatch, text);
+  } else {
+    item.textContent = label;
+  }
   if (tone) {
     item.dataset.tone = tone;
   }
@@ -985,6 +1000,73 @@ function createContextMenuItem(label, onClick, { disabled = false, tone = "" } =
   return item;
 }
 
+function focusFirstSubmenuItem(submenu) {
+  submenu?.querySelector(".context-menu-item:not(:disabled)")?.focus();
+}
+
+function createContextSubmenuItem(label, submenuItems, { disabled = false } = {}) {
+  const host = document.createElement("div");
+  host.className = "context-menu-submenu";
+
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "context-menu-item";
+  item.setAttribute("role", "menuitem");
+  item.setAttribute("aria-haspopup", "menu");
+  item.setAttribute("aria-expanded", "false");
+  item.dataset.hasSubmenu = "true";
+  item.disabled = disabled || submenuItems.length === 0;
+  item.textContent = label;
+
+  const submenu = document.createElement("div");
+  submenu.className = "context-menu context-menu-submenu-panel";
+  submenu.setAttribute("role", "menu");
+  submenu.setAttribute("aria-label", label);
+  submenu.append(...submenuItems);
+
+  const openSubmenu = () => {
+    if (item.disabled) {
+      return;
+    }
+
+    host.parentElement?.querySelectorAll(".context-menu-submenu[data-open='true']").forEach((openHost) => {
+      if (openHost === host) {
+        return;
+      }
+
+      openHost.dataset.open = "false";
+      openHost.querySelector(".context-menu-item[data-has-submenu]")?.setAttribute("aria-expanded", "false");
+    });
+    host.dataset.open = "true";
+    item.setAttribute("aria-expanded", "true");
+  };
+  const closeSubmenu = () => {
+    host.dataset.open = "false";
+    item.setAttribute("aria-expanded", "false");
+  };
+
+  host.addEventListener("pointerenter", openSubmenu);
+  item.addEventListener("focus", openSubmenu);
+  host.addEventListener("focusout", (event) => {
+    if (!(event.relatedTarget instanceof Node) || !host.contains(event.relatedTarget)) {
+      closeSubmenu();
+    }
+  });
+  item.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (item.disabled) {
+      return;
+    }
+
+    openSubmenu();
+    focusFirstSubmenuItem(submenu);
+  });
+
+  host.append(item, submenu);
+  return host;
+}
+
 function positionContextMenu(menu, clientX, clientY) {
   menu.style.left = "0";
   menu.style.top = "0";
@@ -996,6 +1078,42 @@ function positionContextMenu(menu, clientX, clientY) {
   const top = Math.max(margin, Math.min(clientY, window.innerHeight - rect.height - margin));
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
+}
+
+function alignContextMenuSubmenus(menu) {
+  const margin = 8;
+  const gap = 6;
+  const maxPanelHeight = Math.max(80, Math.min(320, window.innerHeight - margin * 2));
+
+  menu.querySelectorAll(".context-menu-submenu").forEach((host) => {
+    const panel = host.querySelector(".context-menu-submenu-panel");
+    if (!panel) {
+      return;
+    }
+
+    delete host.dataset.align;
+    panel.style.top = "-6px";
+    panel.style.maxHeight = `${maxPanelHeight}px`;
+    panel.style.display = "block";
+    panel.style.visibility = "hidden";
+
+    const hostRect = host.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    const fitsRight = hostRect.right + gap + panelRect.width <= window.innerWidth - margin;
+    const fitsLeft = hostRect.left - gap - panelRect.width >= margin;
+    if (!fitsRight && fitsLeft) {
+      host.dataset.align = "left";
+    }
+
+    const bottomOverflow = panelRect.bottom - (window.innerHeight - margin);
+    if (bottomOverflow > 0) {
+      const topShift = Math.min(bottomOverflow, hostRect.top - margin);
+      panel.style.top = `${-6 - topShift}px`;
+    }
+
+    panel.style.visibility = "";
+    panel.style.display = "";
+  });
 }
 
 function openTabContextMenu(tab, rowIndex, clientX, clientY) {
@@ -1013,6 +1131,7 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
   const canGroupTab = Boolean(tab && !tab.pinned);
   const canMoveTab = canMoveTabToGroup(tab);
   const duplicateTabs = getDuplicateTabsForTab(tab);
+  const moveGroupOptions = getMoveTabGroupOptions(tab);
   const menuItems = [
     createContextMenuItem("Switch to tab", () => switchToSelectedTab()),
     createContextMenuItem("Duplicate tab", () => duplicateTab(tab.id)),
@@ -1027,9 +1146,15 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
     createContextMenuItem("Create new group", () => createGroupForTab(tab.id, tab.group?.title || ""), {
       disabled: !canGroupTab
     }),
-    createContextMenuItem("Move to group", () => moveTabToGroup(tab), {
-      disabled: !canMoveTab
-    }),
+    createContextSubmenuItem(
+      "Move to group",
+      moveGroupOptions.map((option) =>
+        createContextMenuItem(option.label, () => moveTabToGroup(tab, option.groupId), { swatchColor: option.color })
+      ),
+      {
+        disabled: !canMoveTab
+      }
+    ),
     createContextMenuSeparator(),
     ...(duplicateTabs.length > 0
       ? [
@@ -1046,6 +1171,7 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
 
   contextMenu = menu;
   positionContextMenu(menu, clientX, clientY);
+  alignContextMenuSubmenus(menu);
   menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
 }
 
@@ -1174,7 +1300,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
 
         const swatch = document.createElement("span");
         swatch.className = "swatch";
-        swatch.style.background = tab.group ? groupColors[tab.group.color] ?? groupColors.grey : "#6b7280";
+        swatch.style.background = tab.group ? getGroupSwatchColor(tab.group) : ungroupedColor;
 
         const sectionTitle = document.createElement("span");
         sectionTitle.className = "section-title";
@@ -1590,6 +1716,30 @@ document.addEventListener("keydown", (event) => {
       event.preventDefault();
       focusContextMenuItem(-1);
       return;
+    }
+
+    if (event.key === "ArrowRight") {
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && activeElement.dataset.hasSubmenu === "true") {
+        const submenu = activeElement.closest(".context-menu-submenu")?.querySelector(".context-menu-submenu-panel");
+        if (submenu) {
+          event.preventDefault();
+          activeElement.click();
+          focusFirstSubmenuItem(submenu);
+          return;
+        }
+      }
+    }
+
+    if (event.key === "ArrowLeft") {
+      const activeElement = document.activeElement;
+      const submenu = activeElement instanceof HTMLElement ? activeElement.closest(".context-menu-submenu-panel") : null;
+      const submenuTrigger = submenu?.closest(".context-menu-submenu")?.querySelector(".context-menu-item[data-has-submenu]");
+      if (submenuTrigger instanceof HTMLElement) {
+        event.preventDefault();
+        submenuTrigger.focus();
+        return;
+      }
     }
 
     if (event.key === "Enter" || event.key === " ") {
