@@ -224,6 +224,11 @@ body:not(.window-blurred) .section-header-clickable:hover {
   border-color: rgba(199, 210, 254, 0.82);
 }
 
+.section-header-focused {
+  background: rgba(14, 165, 233, 0.12);
+  border-color: rgba(125, 211, 252, 0.38);
+}
+
 .swatch {
   width: 10px;
   height: 10px;
@@ -394,6 +399,7 @@ body:not(.window-blurred) .row:hover {
 .icon-button.bookmark,
 .icon-button.group-bookmarks,
 .icon-button.group-rename,
+.icon-button.group-menu,
 .icon-button.close {
   font-size: 22px;
 }
@@ -527,6 +533,10 @@ body:not(.window-blurred) .row:hover {
   width: 220px;
   max-height: min(320px, calc(100vh - 16px));
   overflow-y: auto;
+}
+
+.context-menu-submenu-panel-wide {
+  width: min(420px, calc(100vw - 32px));
 }
 
 .context-menu-submenu[data-align="left"] > .context-menu-submenu-panel {

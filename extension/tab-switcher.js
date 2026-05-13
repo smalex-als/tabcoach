@@ -20,6 +20,7 @@ const GET_DESKTOP_APPS_MESSAGE = "tabcoach:get-desktop-apps";
 const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
 const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCHER_OPEN_LEFT_KEY = "switcherOpenLeft";
+const FOCUSED_GROUPS_KEY = "focusedGroupIdsByWindow";
 
 const groupColors = {
   grey: "#9ca3af",
@@ -71,6 +72,7 @@ let tabRows = [];
 let sortMode = "window";
 let searchQuery = "";
 let selectedIndex = 0;
+let focusedGroupId = null;
 let keepOpenAfterSwitch = false;
 let draggedTabId = null;
 let dropTarget = null;
@@ -82,6 +84,10 @@ const expandedBookmarkGroupIds = new Set();
 
 function sendMessage(message) {
   return chrome.runtime.sendMessage({ windowId, ...message });
+}
+
+function getFocusStorageArea() {
+  return chrome.storage.session ?? chrome.storage.local;
 }
 
 function assertResponse(response, fallbackMessage) {
@@ -159,6 +165,15 @@ function getTabSearchText(tab) {
 function refreshVisibleTabs() {
   const query = searchQuery.trim().toLowerCase();
   visibleTabs = query ? tabs.filter((tab) => getTabSearchText(tab).includes(query)) : [...tabs];
+  if (focusedGroupId !== null && tabs.some((tab) => tab.group?.id === focusedGroupId)) {
+    visibleTabs = visibleTabs.filter((tab) => tab.group?.id === focusedGroupId);
+  } else {
+    const staleFocusedGroupId = focusedGroupId;
+    focusedGroupId = null;
+    if (staleFocusedGroupId !== null) {
+      void persistFocusedGroupId(null).catch(reportActionError);
+    }
+  }
 
   if (sortMode === "recent") {
     visibleTabs.sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0));
@@ -259,6 +274,50 @@ function getTabActionLabel(tab) {
 
 function getTabById(tabId) {
   return tabs.find((tab) => tab.id === tabId) ?? null;
+}
+
+function getGroupById(groupId) {
+  return tabs.find((tab) => tab.group?.id === groupId)?.group ?? null;
+}
+
+function getGroupOptions({ excludeGroupId = null } = {}) {
+  const seenGroupIds = new Set();
+  const groups = [];
+
+  tabs.forEach((tab) => {
+    if (!tab.group || seenGroupIds.has(tab.group.id) || tab.group.id === excludeGroupId) {
+      return;
+    }
+
+    seenGroupIds.add(tab.group.id);
+    groups.push({
+      groupId: tab.group.id,
+      label: tab.group.title || "Unnamed group",
+      color: getGroupSwatchColor(tab.group)
+    });
+  });
+
+  return groups;
+}
+
+async function loadStoredFocusedGroupId() {
+  const stored = await getFocusStorageArea().get({ [FOCUSED_GROUPS_KEY]: {} });
+  const groupId = Number(stored[FOCUSED_GROUPS_KEY]?.[String(windowId)]);
+  return Number.isInteger(groupId) && groupId >= 0 ? groupId : null;
+}
+
+async function persistFocusedGroupId(groupId) {
+  const storageArea = getFocusStorageArea();
+  const stored = await storageArea.get({ [FOCUSED_GROUPS_KEY]: {} });
+  const focusedGroupIdsByWindow = { ...(stored[FOCUSED_GROUPS_KEY] || {}) };
+
+  if (typeof groupId === "number") {
+    focusedGroupIdsByWindow[String(windowId)] = groupId;
+  } else {
+    delete focusedGroupIdsByWindow[String(windowId)];
+  }
+
+  await storageArea.set({ [FOCUSED_GROUPS_KEY]: focusedGroupIdsByWindow });
 }
 
 function getGroupSwatchColor(group) {
@@ -407,6 +466,34 @@ async function setGroupCollapsed(groupId, collapsed) {
   }
 
   applyRowState();
+}
+
+function focusGroup(groupId) {
+  if (typeof groupId !== "number") {
+    return;
+  }
+
+  const group = getGroupById(groupId);
+  if (!group) {
+    return;
+  }
+
+  focusedGroupId = groupId;
+  void persistFocusedGroupId(groupId).catch(reportActionError);
+  refreshVisibleTabs();
+  renderTabs({ scrollBlock: "center" });
+  selectedIndex = getRowIndexForGroupId(groupId);
+  applyRowState("center");
+}
+
+function leaveFocusGroupMode() {
+  const previousGroupId = focusedGroupId;
+  focusedGroupId = null;
+  void persistFocusedGroupId(null).catch(reportActionError);
+  refreshVisibleTabs();
+  renderTabs({ scrollBlock: "center" });
+  selectedIndex = previousGroupId !== null ? getRowIndexForGroupId(previousGroupId) : 0;
+  applyRowState("center");
 }
 
 async function renameGroup(groupId, currentTitle) {
@@ -1004,7 +1091,7 @@ function focusFirstSubmenuItem(submenu) {
   submenu?.querySelector(".context-menu-item:not(:disabled)")?.focus();
 }
 
-function createContextSubmenuItem(label, submenuItems, { disabled = false } = {}) {
+function createContextSubmenuItem(label, submenuItems, { disabled = false, panelClassName = "" } = {}) {
   const host = document.createElement("div");
   host.className = "context-menu-submenu";
 
@@ -1019,7 +1106,7 @@ function createContextSubmenuItem(label, submenuItems, { disabled = false } = {}
   item.textContent = label;
 
   const submenu = document.createElement("div");
-  submenu.className = "context-menu context-menu-submenu-panel";
+  submenu.className = `context-menu context-menu-submenu-panel${panelClassName ? ` ${panelClassName}` : ""}`;
   submenu.setAttribute("role", "menu");
   submenu.setAttribute("aria-label", label);
   submenu.append(...submenuItems);
@@ -1152,7 +1239,8 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
         createContextMenuItem(option.label, () => moveTabToGroup(tab, option.groupId), { swatchColor: option.color })
       ),
       {
-        disabled: !canMoveTab
+        disabled: !canMoveTab,
+        panelClassName: "context-menu-submenu-panel-wide"
       }
     ),
     createContextMenuSeparator(),
@@ -1166,6 +1254,45 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
         ]
       : []),
     createContextMenuItem("Close tab", () => closeTab(tab.id), { tone: "danger" })
+  ];
+  menu.append(...menuItems);
+
+  contextMenu = menu;
+  positionContextMenu(menu, clientX, clientY);
+  alignContextMenuSubmenus(menu);
+  menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
+}
+
+function openGroupContextMenu(group, rowIndex, clientX, clientY) {
+  if (!group) {
+    return;
+  }
+
+  closeContextMenu();
+  selectedIndex = rowIndex;
+  pointerDownRowIndex = null;
+  suppressNextRowClick = false;
+  applyRowState();
+
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `Actions for ${group.title || "Unnamed group"}`);
+
+  const switchGroupOptions = getGroupOptions({ excludeGroupId: group.id });
+  const menuItems = [
+    createContextMenuItem(focusedGroupId === group.id ? "Refocus group" : "Focus group", () => focusGroup(group.id)),
+    createContextSubmenuItem(
+      focusedGroupId === null ? "Focus another group" : "Switch focus group",
+      switchGroupOptions.map((option) =>
+        createContextMenuItem(option.label, () => focusGroup(option.groupId), { swatchColor: option.color })
+      ),
+      { disabled: switchGroupOptions.length === 0, panelClassName: "context-menu-submenu-panel-wide" }
+    ),
+    createContextMenuItem("Leave focus mode", leaveFocusGroupMode, { disabled: focusedGroupId === null }),
+    createContextMenuSeparator(),
+    createContextMenuItem(group.collapsed ? "Expand group" : "Collapse group", () => setGroupCollapsed(group.id, !group.collapsed)),
+    createContextMenuItem("Rename group", () => renameGroup(group.id, group.title || ""))
   ];
   menu.append(...menuItems);
 
@@ -1281,7 +1408,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     return;
   }
 
-  const showGroupSections = sortMode === "window" && visibleTabs.some((tab) => tab.group);
+  const showGroupSections = (sortMode === "window" || focusedGroupId !== null) && visibleTabs.some((tab) => tab.group);
   const tabCountsBySectionKey = new Map();
   if (showGroupSections) {
     visibleTabs.forEach((tab) => {
@@ -1304,8 +1431,9 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
 
         const sectionTitle = document.createElement("span");
         sectionTitle.className = "section-title";
+        const isCollapsedInSwitcher = Boolean(tab.group?.collapsed && focusedGroupId !== tab.group.id);
         sectionTitle.textContent = tab.group
-          ? `${tab.group.title || "Unnamed group"}${tab.group.collapsed ? ` (${tabCountsBySectionKey.get(sectionKey) ?? 0} collapsed)` : ""}`
+          ? `${tab.group.title || "Unnamed group"}${isCollapsedInSwitcher ? ` (${tabCountsBySectionKey.get(sectionKey) ?? 0} collapsed)` : ""}`
           : "Ungrouped";
 
         sectionHeader.append(swatch, sectionTitle);
@@ -1323,9 +1451,19 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
             `Rename ${tab.group.title || "Unnamed group"}`,
             () => renameGroup(tab.group.id, tab.group.title || "")
           );
-          sectionHeader.append(bookmarkRowsButton, renameButton);
+          const menuButton = createButton(
+            "group-menu",
+            "⋯",
+            `Open menu for ${tab.group.title || "Unnamed group"}`,
+            (button) => {
+              const rect = button.getBoundingClientRect();
+              openGroupContextMenu(tab.group, rows.indexOf(sectionHeader), rect.left, rect.bottom + 4);
+            }
+          );
+          sectionHeader.append(bookmarkRowsButton, renameButton, menuButton);
           sectionHeader.classList.add("section-header-clickable");
-          if (tab.group.collapsed) {
+          sectionHeader.classList.toggle("section-header-focused", focusedGroupId === tab.group.id);
+          if (isCollapsedInSwitcher) {
             sectionHeader.classList.add("section-header-collapsed");
           }
           sectionHeader.setAttribute("role", "option");
@@ -1354,13 +1492,18 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
             selectedIndex = rowIndex;
             void setGroupCollapsed(tab.group.id, !tab.group.collapsed).catch(reportActionError);
           });
+          sectionHeader.addEventListener("contextmenu", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openGroupContextMenu(tab.group, rowIndex, event.clientX, event.clientY);
+          });
           rows.push(sectionHeader);
         }
         list.appendChild(sectionHeader);
         lastSectionKey = sectionKey;
       }
 
-      if (tab.group?.collapsed) {
+      if (tab.group?.collapsed && focusedGroupId !== tab.group.id) {
         return;
       }
     }
@@ -1536,6 +1679,7 @@ async function loadTabs() {
     keepOpenAfterSwitch = Boolean(stored[SWITCHER_OPEN_LEFT_KEY]);
     refreshNumericBookmarkSlots();
     tabs = dedupeTabsById(response.tabs);
+    focusedGroupId = await loadStoredFocusedGroupId();
     refreshDuplicateCounts();
     refreshVisibleTabs();
     renderTabs({ scrollBlock: "center" });
