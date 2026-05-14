@@ -21,6 +21,7 @@ const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
 const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCHER_OPEN_LEFT_KEY = "switcherOpenLeft";
 const FOCUSED_GROUPS_KEY = "focusedGroupIdsByWindow";
+const TAB_LABELS_KEY = "tabLabelsByWindow";
 
 const groupColors = {
   grey: "#9ca3af",
@@ -66,6 +67,7 @@ let tabs = [];
 let duplicateCountsByTabId = new Map();
 let numericBookmarks = {};
 let numericBookmarkSlotsByNormalizedUrl = new Map();
+let tabLabelsByUrl = {};
 let visibleTabs = [];
 let rows = [];
 let tabRows = [];
@@ -101,10 +103,33 @@ function assertResponse(response, fallbackMessage) {
 function formatUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
-    return `${parsed.hostname}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+    const host = parsed.hostname;
+    const pathParts = parsed.pathname.split("/").filter(Boolean);
+
+    if (host.endsWith(".atlassian.net") && pathParts[0] === "browse" && pathParts[1]) {
+      return `${host}/browse/${pathParts[1]}`;
+    }
+
+    return host;
   } catch {
     return rawUrl;
   }
+}
+
+function formatTabTitle(tab) {
+  const title = tab?.displayTitle || tab?.title || tab?.url || "Untitled tab";
+  const separator = " - ";
+  const separatorIndex = title.indexOf(separator);
+  if (separatorIndex > 0) {
+    const prefix = title.slice(0, separatorIndex).trim();
+    const suffix = title.slice(separatorIndex + separator.length).trim();
+    const suffixLooksTechnical = suffix.length > 48 && !/\s/.test(suffix);
+    if (prefix && suffixLooksTechnical) {
+      return prefix;
+    }
+  }
+
+  return title;
 }
 
 function normalizeUrl(rawUrl) {
@@ -153,6 +178,7 @@ function getTabSearchText(tab) {
     tab.title,
     tab.url,
     tab.group?.title,
+    tab.label,
     tab.active ? "active" : "",
     tab.pinned ? "pinned" : "",
     tab.bookmarked ? "bookmarked" : ""
@@ -235,6 +261,17 @@ function dedupeTabsById(items) {
   });
 }
 
+function applyTabLabels(items) {
+  return items.map((tab) => ({
+    ...tab,
+    label: typeof tabLabelsByUrl[getTabLabelKey(tab)] === "string" ? tabLabelsByUrl[getTabLabelKey(tab)] : ""
+  }));
+}
+
+function setTabs(nextTabs) {
+  tabs = applyTabLabels(dedupeTabsById(nextTabs));
+}
+
 function refreshNumericBookmarkSlots() {
   numericBookmarkSlotsByNormalizedUrl = new Map();
 
@@ -269,7 +306,7 @@ function updateSortButtons() {
 }
 
 function getTabActionLabel(tab) {
-  return tab?.displayTitle || tab?.title || tab?.url || "selected tab";
+  return tab ? formatTabTitle(tab) : "selected tab";
 }
 
 function getTabById(tabId) {
@@ -306,6 +343,16 @@ async function loadStoredFocusedGroupId() {
   return Number.isInteger(groupId) && groupId >= 0 ? groupId : null;
 }
 
+function getTabLabelKey(tab) {
+  return tab?.url ? normalizeUrl(tab.url) : "";
+}
+
+async function loadStoredTabLabels() {
+  const stored = await getFocusStorageArea().get({ [TAB_LABELS_KEY]: {} });
+  const labels = stored[TAB_LABELS_KEY]?.[String(windowId)] || {};
+  return Object.fromEntries(Object.entries(labels).filter(([key, label]) => key && typeof label === "string"));
+}
+
 async function persistFocusedGroupId(groupId) {
   const storageArea = getFocusStorageArea();
   const stored = await storageArea.get({ [FOCUSED_GROUPS_KEY]: {} });
@@ -318,6 +365,20 @@ async function persistFocusedGroupId(groupId) {
   }
 
   await storageArea.set({ [FOCUSED_GROUPS_KEY]: focusedGroupIdsByWindow });
+}
+
+async function persistTabLabels() {
+  const storageArea = getFocusStorageArea();
+  const stored = await storageArea.get({ [TAB_LABELS_KEY]: {} });
+  const tabLabelsByWindow = { ...(stored[TAB_LABELS_KEY] || {}) };
+
+  if (Object.keys(tabLabelsByUrl).length > 0) {
+    tabLabelsByWindow[String(windowId)] = { ...tabLabelsByUrl };
+  } else {
+    delete tabLabelsByWindow[String(windowId)];
+  }
+
+  await storageArea.set({ [TAB_LABELS_KEY]: tabLabelsByWindow });
 }
 
 function getGroupSwatchColor(group) {
@@ -427,6 +488,7 @@ function insertDuplicatedTab(sourceTabId, duplicatedTab) {
     active: true,
     displayTitle: duplicatedTab.title || sourceTab?.displayTitle || sourceTab?.title || duplicatedTab.url || "Untitled tab",
     bookmarked: Boolean(sourceTab?.bookmarked),
+    label: tabLabelsByUrl[getTabLabelKey(duplicatedTab)] || tabLabelsByUrl[getTabLabelKey(sourceTab)] || "",
     group: sourceTab?.group ?? null
   };
 
@@ -453,7 +515,7 @@ async function setGroupCollapsed(groupId, collapsed) {
   const response = await sendMessage({ type: SET_GROUP_COLLAPSED_MESSAGE, groupId, collapsed }).then((result) =>
     assertResponse(result, "Group update failed")
   );
-  tabs = dedupeTabsById(response.tabs);
+  setTabs(response.tabs);
   refreshDuplicateCounts();
   refreshVisibleTabs();
   renderTabs();
@@ -510,7 +572,7 @@ async function renameGroup(groupId, currentTitle) {
   const response = await sendMessage({ type: RENAME_GROUP_MESSAGE, groupId, title: nextTitle }).then((result) =>
     assertResponse(result, "Group rename failed")
   );
-  tabs = dedupeTabsById(response.tabs);
+  setTabs(response.tabs);
   refreshDuplicateCounts();
   refreshVisibleTabs();
   renderTabs();
@@ -528,7 +590,7 @@ async function openGroupBookmark(groupId, bookmarkId, insertOffset = 0) {
     return;
   }
 
-  tabs = dedupeTabsById(response.tabs);
+  setTabs(response.tabs);
   refreshDuplicateCounts();
   refreshVisibleTabs();
   renderTabs();
@@ -550,7 +612,7 @@ async function createGroupForTab(tabId, currentTitle = "") {
   const response = await sendMessage({ type: CREATE_GROUP_MESSAGE, tabId, title: nextTitle }).then((result) =>
     assertResponse(result, "Group create failed")
   );
-  tabs = dedupeTabsById(response.tabs);
+  setTabs(response.tabs);
   refreshDuplicateCounts();
   refreshVisibleTabs();
   renderTabs();
@@ -610,7 +672,7 @@ async function moveTabToGroup(tab, groupId) {
   const response = await sendMessage({ type: SET_TAB_GROUP_MESSAGE, tabId: tab.id, groupId }).then((result) =>
     assertResponse(result, "Tab group move failed")
   );
-  tabs = dedupeTabsById(response.tabs);
+  setTabs(response.tabs);
   refreshDuplicateCounts();
   refreshVisibleTabs();
   renderTabs();
@@ -812,6 +874,55 @@ async function toggleBookmark(tabId) {
   list.scrollTop = previousScrollTop;
 }
 
+async function editTabLabel(tab) {
+  if (typeof tab?.id !== "number") {
+    return;
+  }
+
+  const nextLabel = window.prompt("Tab label", tab.label || "");
+  if (nextLabel === null) {
+    return;
+  }
+
+  const normalizedLabel = nextLabel.trim();
+  const labelKey = getTabLabelKey(tab);
+  if (!labelKey) {
+    return;
+  }
+
+  if (normalizedLabel) {
+    tabLabelsByUrl[labelKey] = normalizedLabel;
+  } else {
+    delete tabLabelsByUrl[labelKey];
+  }
+
+  await persistTabLabels();
+  tabs = applyTabLabels(tabs);
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabId(tab.id);
+  applyRowState();
+}
+
+async function clearTabLabel(tab) {
+  if (typeof tab?.id !== "number") {
+    return;
+  }
+
+  const labelKey = getTabLabelKey(tab);
+  if (!labelKey) {
+    return;
+  }
+
+  delete tabLabelsByUrl[labelKey];
+  await persistTabLabels();
+  tabs = applyTabLabels(tabs);
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabId(tab.id);
+  applyRowState();
+}
+
 async function copyTabUrl(tabId) {
   const tab = tabs.find((item) => item.id === tabId);
   if (!tab?.url) {
@@ -981,7 +1092,7 @@ async function moveDraggedTab() {
       groupId: targetGroupId
     }).then((result) => assertResponse(result, "Tab move failed"));
 
-    tabs = dedupeTabsById(response.tabs);
+    setTabs(response.tabs);
     refreshDuplicateCounts();
     refreshVisibleTabs();
     renderTabs();
@@ -1222,6 +1333,8 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
   const menuItems = [
     createContextMenuItem("Switch to tab", () => switchToSelectedTab()),
     createContextMenuItem("Duplicate tab", () => duplicateTab(tab.id)),
+    createContextMenuItem(tab.label ? "Edit label" : "Set label", () => editTabLabel(tab)),
+    ...(tab.label ? [createContextMenuItem("Clear label", () => clearTabLabel(tab))] : []),
     createContextMenuItem("Copy URL", async () => {
       const currentTab = getTabById(tab.id) ?? tab;
       const copied = await copyTabUrl(tab.id);
@@ -1516,7 +1629,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     row.dataset.tabcoachTabId = String(tab.id ?? "");
     row.dataset.tabcoachGroupId = String(tab.group?.id ?? -1);
     row.dataset.active = String(Boolean(tab.active));
-    row.title = sortMode === "window" ? "Drag to reorder tabs" : "";
+    row.title = "";
 
     const rowIndex = rows.length;
     row.addEventListener("pointerdown", (event) => {
@@ -1603,11 +1716,19 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
 
     const tabTitle = document.createElement("div");
     tabTitle.className = "tab-title";
-    const tabTitleText = tab.displayTitle || tab.title || tab.url || "Untitled tab";
+    const tabTitleText = formatTabTitle(tab);
     const tabTitleLabel = document.createElement("span");
     tabTitleLabel.className = "tab-title-label";
     tabTitleLabel.textContent = tabTitleText;
     tabTitle.appendChild(tabTitleLabel);
+
+    if (tab.label) {
+      const tabLabelPill = document.createElement("span");
+      tabLabelPill.className = "tab-label-pill";
+      tabLabelPill.textContent = tab.label;
+      tabLabelPill.title = `Label: ${tab.label}`;
+      tabTitle.appendChild(tabLabelPill);
+    }
 
     const duplicateCount = duplicateCountsByTabId.get(tab.id);
     if (duplicateCount) {
@@ -1678,7 +1799,8 @@ async function loadTabs() {
     numericBookmarks = stored[NUMERIC_BOOKMARKS_KEY] || {};
     keepOpenAfterSwitch = Boolean(stored[SWITCHER_OPEN_LEFT_KEY]);
     refreshNumericBookmarkSlots();
-    tabs = dedupeTabsById(response.tabs);
+    tabLabelsByUrl = await loadStoredTabLabels();
+    setTabs(response.tabs);
     focusedGroupId = await loadStoredFocusedGroupId();
     refreshDuplicateCounts();
     refreshVisibleTabs();

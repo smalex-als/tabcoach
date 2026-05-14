@@ -340,8 +340,28 @@ body:not(.window-blurred) .row:hover {
 
 .tab-url {
   margin-top: 2px;
-  color: #d1d5db;
-  font-size: 14px;
+  color: #aeb8c7;
+  font-size: 13px;
+}
+
+.tab-label-pill {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 180px;
+  height: 20px;
+  margin-left: 8px;
+  border: 1px solid rgba(45, 212, 191, 0.42);
+  border-radius: 999px;
+  background: rgba(20, 184, 166, 0.14);
+  color: #99f6e4;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .duplicate-pill {
