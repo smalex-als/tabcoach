@@ -386,6 +386,28 @@ body:not(.window-blurred) .row:hover {
   font-weight: 700;
 }
 
+.tab-label-input {
+  flex: 0 1 220px;
+  min-width: 80px;
+  height: 24px;
+  margin-left: 8px;
+  border: 1px solid rgba(45, 212, 191, 0.58);
+  border-radius: 6px;
+  background: #111827;
+  color: #f9fafb;
+  padding: 0 8px;
+  font: 600 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  outline: none;
+}
+
+.tab-label-input:focus {
+  box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.28);
+}
+
+.tab-label-input::placeholder {
+  color: #9ca3af;
+}
+
 .duplicate-pill {
   display: inline-flex;
   align-items: center;

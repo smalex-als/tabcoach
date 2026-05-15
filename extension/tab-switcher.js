@@ -76,6 +76,8 @@ let searchQuery = "";
 let selectedIndex = 0;
 let focusedGroupId = null;
 let renamingGroupId = null;
+let editingLabelTabId = null;
+let editingLabelDraft = "";
 let keepOpenAfterSwitch = false;
 let draggedTabId = null;
 let dropTarget = null;
@@ -92,6 +94,10 @@ function sendMessage(message) {
 
 function getFocusStorageArea() {
   return chrome.storage.session ?? chrome.storage.local;
+}
+
+function getTabLabelStorageArea() {
+  return chrome.storage.local ?? chrome.storage.sync;
 }
 
 function assertResponse(response, fallbackMessage) {
@@ -350,9 +356,22 @@ function getTabLabelKey(tab) {
 }
 
 async function loadStoredTabLabels() {
-  const stored = await getFocusStorageArea().get({ [TAB_LABELS_KEY]: {} });
+  const storageArea = getTabLabelStorageArea();
+  const stored = await storageArea.get({ [TAB_LABELS_KEY]: {} });
   const labels = stored[TAB_LABELS_KEY]?.[String(windowId)] || {};
-  return Object.fromEntries(Object.entries(labels).filter(([key, label]) => key && typeof label === "string"));
+  const cleanLabels = Object.fromEntries(Object.entries(labels).filter(([key, label]) => key && typeof label === "string"));
+  if (Object.keys(cleanLabels).length > 0 || !chrome.storage.session || storageArea === chrome.storage.session) {
+    return cleanLabels;
+  }
+
+  const legacyStored = await chrome.storage.session.get({ [TAB_LABELS_KEY]: {} });
+  const legacyLabels = legacyStored[TAB_LABELS_KEY]?.[String(windowId)] || {};
+  const cleanLegacyLabels = Object.fromEntries(Object.entries(legacyLabels).filter(([key, label]) => key && typeof label === "string"));
+  if (Object.keys(cleanLegacyLabels).length > 0) {
+    await persistTabLabelsToStorage(cleanLegacyLabels);
+  }
+
+  return cleanLegacyLabels;
 }
 
 async function persistFocusedGroupId(groupId) {
@@ -370,12 +389,16 @@ async function persistFocusedGroupId(groupId) {
 }
 
 async function persistTabLabels() {
-  const storageArea = getFocusStorageArea();
+  await persistTabLabelsToStorage(tabLabelsByUrl);
+}
+
+async function persistTabLabelsToStorage(labelsByUrl) {
+  const storageArea = getTabLabelStorageArea();
   const stored = await storageArea.get({ [TAB_LABELS_KEY]: {} });
   const tabLabelsByWindow = { ...(stored[TAB_LABELS_KEY] || {}) };
 
-  if (Object.keys(tabLabelsByUrl).length > 0) {
-    tabLabelsByWindow[String(windowId)] = { ...tabLabelsByUrl };
+  if (Object.keys(labelsByUrl).length > 0) {
+    tabLabelsByWindow[String(windowId)] = { ...labelsByUrl };
   } else {
     delete tabLabelsByWindow[String(windowId)];
   }
@@ -437,6 +460,18 @@ function getSelectedBookmarkTarget() {
 function getRowIndexForTabId(tabId) {
   const rowIndex = rows.findIndex((row) => Number(row.dataset.tabcoachTabId) === tabId);
   return rowIndex >= 0 ? rowIndex : 0;
+}
+
+function focusTabLabelInput(tabId) {
+  requestAnimationFrame(() => {
+    const input = list.querySelector(`[data-tabcoach-label-tab-id="${tabId}"]`);
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+
+    input.focus();
+    input.select();
+  });
 }
 
 function getRowIndexForGroupId(groupId) {
@@ -922,13 +957,35 @@ async function toggleBookmark(tabId) {
   list.scrollTop = previousScrollTop;
 }
 
-async function editTabLabel(tab) {
-  if (typeof tab?.id !== "number") {
+function startEditTabLabel(tabId) {
+  const tab = getTabById(tabId);
+  if (!tab) {
     return;
   }
 
-  const nextLabel = window.prompt("Tab label", tab.label || "");
-  if (nextLabel === null) {
+  closeContextMenu();
+  editingLabelTabId = tabId;
+  editingLabelDraft = tab.label || "";
+  renderTabs({ scrollBlock: "center" });
+  selectedIndex = getRowIndexForTabId(tabId);
+  applyRowState("center");
+  focusTabLabelInput(tabId);
+}
+
+function cancelEditTabLabel(tabId) {
+  if (editingLabelTabId !== tabId) {
+    return;
+  }
+
+  editingLabelTabId = null;
+  editingLabelDraft = "";
+  renderTabs();
+  selectedIndex = getRowIndexForTabId(tabId);
+  applyRowState();
+}
+
+async function editTabLabel(tab, nextLabel = editingLabelDraft) {
+  if (typeof tab?.id !== "number") {
     return;
   }
 
@@ -944,6 +1001,8 @@ async function editTabLabel(tab) {
     delete tabLabelsByUrl[labelKey];
   }
 
+  editingLabelTabId = null;
+  editingLabelDraft = "";
   await persistTabLabels();
   tabs = applyTabLabels(tabs);
   refreshVisibleTabs();
@@ -962,6 +1021,8 @@ async function clearTabLabel(tab) {
     return;
   }
 
+  editingLabelTabId = null;
+  editingLabelDraft = "";
   delete tabLabelsByUrl[labelKey];
   await persistTabLabels();
   tabs = applyTabLabels(tabs);
@@ -1381,7 +1442,7 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
   const menuItems = [
     createContextMenuItem("Switch to tab", () => switchToSelectedTab()),
     createContextMenuItem("Duplicate tab", () => duplicateTab(tab.id)),
-    createContextMenuItem(tab.label ? "Edit label" : "Set label", () => editTabLabel(tab)),
+    createContextMenuItem(tab.label ? "Edit label" : "Set label", () => startEditTabLabel(tab.id)),
     ...(tab.label ? [createContextMenuItem("Clear label", () => clearTabLabel(tab))] : []),
     createContextMenuItem("Copy URL", async () => {
       const currentTab = getTabById(tab.id) ?? tab;
@@ -1829,7 +1890,60 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     tabTitleLabel.textContent = tabTitleText;
     tabTitle.appendChild(tabTitleLabel);
 
-    if (tab.label) {
+    if (editingLabelTabId === tab.id) {
+      const labelInput = document.createElement("input");
+      labelInput.className = "tab-label-input";
+      labelInput.type = "text";
+      labelInput.value = editingLabelDraft;
+      labelInput.placeholder = "Label";
+      labelInput.dataset.tabcoachLabelTabId = String(tab.id);
+      labelInput.setAttribute("aria-label", `Edit label for ${formatTabTitle(tab)}`);
+
+      let labelHandled = false;
+      const finishLabelEdit = (save) => {
+        if (labelHandled) {
+          return;
+        }
+
+        labelHandled = true;
+        if (save) {
+          void editTabLabel(getTabById(tab.id) ?? tab, labelInput.value).catch(reportActionError);
+        } else {
+          cancelEditTabLabel(tab.id);
+        }
+      };
+
+      labelInput.addEventListener("pointerdown", (event) => {
+        event.stopPropagation();
+      });
+      labelInput.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+      labelInput.addEventListener("input", () => {
+        editingLabelDraft = labelInput.value;
+      });
+      labelInput.addEventListener("keydown", (event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") {
+          event.preventDefault();
+          finishLabelEdit(true);
+          return;
+        }
+
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finishLabelEdit(false);
+        }
+      });
+      labelInput.addEventListener("blur", () => {
+        if (isReplacingListChildren) {
+          return;
+        }
+
+        finishLabelEdit(true);
+      });
+      tabTitle.appendChild(labelInput);
+    } else if (tab.label) {
       const tabLabelPill = document.createElement("span");
       tabLabelPill.className = "tab-label-pill";
       tabLabelPill.textContent = tab.label;
@@ -1913,18 +2027,28 @@ async function loadTabs() {
     refreshVisibleTabs();
     const activeRenamingGroupId =
       typeof renamingGroupId === "number" && tabs.some((tab) => tab.group?.id === renamingGroupId) ? renamingGroupId : null;
+    const activeEditingLabelTabId =
+      typeof editingLabelTabId === "number" && tabs.some((tab) => tab.id === editingLabelTabId) ? editingLabelTabId : null;
     if (renamingGroupId !== null && activeRenamingGroupId === null) {
       renamingGroupId = null;
+    }
+    if (editingLabelTabId !== null && activeEditingLabelTabId === null) {
+      editingLabelTabId = null;
+      editingLabelDraft = "";
     }
 
     renderTabs({ scrollBlock: "center" });
     selectedIndex =
       activeRenamingGroupId !== null
         ? getRowIndexForGroupId(activeRenamingGroupId)
+        : activeEditingLabelTabId !== null
+          ? getRowIndexForTabId(activeEditingLabelTabId)
         : getRowIndexForTabOrGroup(selectedTabId || visibleTabs.find((tab) => tab.active)?.id);
     applyRowState("center");
     if (activeRenamingGroupId !== null) {
       focusGroupRenameInput(activeRenamingGroupId);
+    } else if (activeEditingLabelTabId !== null) {
+      focusTabLabelInput(activeEditingLabelTabId);
     } else {
       searchInput.focus();
     }
@@ -2084,6 +2208,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (
+    event.target instanceof HTMLElement &&
+    (event.target.closest(".tab-label-input") || event.target.closest(".section-rename-input"))
+  ) {
+    return;
+  }
+
   if (contextMenu) {
     if (event.key === "Escape") {
       event.preventDefault();
