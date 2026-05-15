@@ -51,7 +51,7 @@ Server defaults:
 - `PORT`: `3847`
 - `TAB_SWITCH_LOG_PATH`: `tab-switch-log.jsonl`
 - `TAB_EVENT_LOG_PATH`: `tabcoach-events.jsonl`
-- `DESKTOP_APPS_JSON`: optional desktop app allowlist, defaults to iTerm
+- `DESKTOP_APPS_JSON`: optional desktop app allowlist, defaults to iTerm and IntelliJ IDEA
 
 Health check:
 
@@ -79,7 +79,7 @@ The extension will:
 - show saved bookmarks for a tab group directly in the list when they are not currently open, then open a selected bookmark back into that group
 - assign numeric tab bookmark 1 from any page with `Ctrl+Shift+1` (`Control+Shift+1` on macOS), then jump with `Ctrl+1`; slots 0 through 9 are available as extension commands and can be assigned in `chrome://extensions/shortcuts`; saved numeric bookmarks show a small in-page notification; the `Command+E` popup supports slots 0 through 9
 - store bookmarks under `Tabcoach/<tab group name>` to keep saved tabs organized
-- show desktop app launcher buttons at the bottom of the `Command+E` popup; by default, the `iTerm` button asks the local server to run `open -a iTerm`
+- show desktop app launcher buttons at the bottom of the `Command+E` popup; by default, the `iTerm` and `IntelliJ IDEA` buttons ask the local server to run `open -a` for those apps
 - keep a per-window activation history and expose previous/next history commands for jumping backward and forward between recently active tabs in the same window
 - show a tab movement statistics page from extension options, backed by the local tab switch log
 
@@ -111,11 +111,11 @@ The `Command+E` popup loads desktop app buttons from `GET /api/desktop-apps` and
 Default allowlist:
 
 ```json
-[{"id":"iterm","label":"iTerm","macAppName":"iTerm"}]
+[{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"intellij-idea","label":"IntelliJ IDEA","macAppName":"IntelliJ IDEA"}]
 ```
 
 To add more macOS apps, start the server with `DESKTOP_APPS_JSON`:
 
 ```bash
-DESKTOP_APPS_JSON='[{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"notes","label":"Notes","macAppName":"Notes"}]' npm run dev
+DESKTOP_APPS_JSON='[{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"intellij-idea","label":"IntelliJ IDEA","macAppName":"IntelliJ IDEA"},{"id":"notes","label":"Notes","macAppName":"Notes"}]' npm run dev
 ```

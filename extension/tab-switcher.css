@@ -280,6 +280,11 @@ body:not(.window-blurred) .section-header-clickable:hover {
   cursor: pointer;
 }
 
+.row-recency-ladder {
+  margin-left: var(--tabcoach-recency-indent, 0);
+  transition: margin-left 120ms ease-out;
+}
+
 .row[data-active="true"] {
   background: rgba(99, 102, 241, 0.22);
   border-color: rgba(129, 140, 248, 0.55);

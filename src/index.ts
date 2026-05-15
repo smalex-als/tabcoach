@@ -72,6 +72,11 @@ const DEFAULT_DESKTOP_APPS: DesktopApp[] = [
     id: "iterm",
     label: "iTerm",
     macAppName: "iTerm"
+  },
+  {
+    id: "intellij-idea",
+    label: "IntelliJ IDEA",
+    macAppName: "IntelliJ IDEA"
   }
 ];
 

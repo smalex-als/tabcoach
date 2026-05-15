@@ -410,6 +410,33 @@ function getGroupSwatchColor(group) {
   return groupColors[group?.color] ?? groupColors.grey;
 }
 
+function getGroupRecencyRanks(tabItems) {
+  const tabsByGroupId = new Map();
+
+  tabItems.forEach((tab) => {
+    if (!tab.group) {
+      return;
+    }
+
+    const groupTabs = tabsByGroupId.get(tab.group.id) ?? [];
+    groupTabs.push(tab);
+    tabsByGroupId.set(tab.group.id, groupTabs);
+  });
+
+  const ranksByTabId = new Map();
+  tabsByGroupId.forEach((groupTabs) => {
+    const newestTabs = [...groupTabs]
+      .sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0))
+      .slice(0, 3);
+
+    newestTabs.forEach((tab, rank) => {
+      ranksByTabId.set(tab.id, 3 - rank);
+    });
+  });
+
+  return ranksByTabId;
+}
+
 function applyRowState(scrollBlock = "nearest") {
   rows.forEach((row, index) => {
     row.setAttribute("aria-selected", String(index === selectedIndex));
@@ -1637,6 +1664,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
 
   const showGroupSections = (sortMode === "window" || focusedGroupId !== null) && visibleTabs.some((tab) => tab.group);
   const tabCountsBySectionKey = new Map();
+  const recencyRanksByTabId = showGroupSections ? getGroupRecencyRanks(visibleTabs) : new Map();
   if (showGroupSections) {
     visibleTabs.forEach((tab) => {
       const sectionKey = tab.group ? `group:${tab.group.id}` : "ungrouped";
@@ -1798,6 +1826,13 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     row.dataset.tabcoachGroupId = String(tab.group?.id ?? -1);
     row.dataset.active = String(Boolean(tab.active));
     row.title = "";
+    if (showGroupSections && tab.group) {
+      const recencyRank = recencyRanksByTabId.get(tab.id) ?? 0;
+      if (recencyRank > 0) {
+        row.classList.add("row-recency-ladder");
+        row.style.setProperty("--tabcoach-recency-indent", `${recencyRank * 12}px`);
+      }
+    }
 
     const rowIndex = rows.length;
     row.addEventListener("pointerdown", (event) => {
