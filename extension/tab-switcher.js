@@ -75,6 +75,7 @@ let sortMode = "window";
 let searchQuery = "";
 let selectedIndex = 0;
 let focusedGroupId = null;
+let renamingGroupId = null;
 let keepOpenAfterSwitch = false;
 let draggedTabId = null;
 let dropTarget = null;
@@ -82,6 +83,7 @@ let refreshTimer = null;
 let suppressNextRowClick = false;
 let pointerDownRowIndex = null;
 let contextMenu = null;
+let isReplacingListChildren = false;
 const expandedBookmarkGroupIds = new Set();
 
 function sendMessage(message) {
@@ -558,17 +560,60 @@ function leaveFocusGroupMode() {
   applyRowState("center");
 }
 
-async function renameGroup(groupId, currentTitle) {
+function focusGroupRenameInput(groupId) {
+  requestAnimationFrame(() => {
+    const input = list.querySelector(`[data-tabcoach-rename-group-id="${groupId}"]`);
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+
+    input.focus();
+    input.select();
+  });
+}
+
+function startRenameGroup(groupId) {
   if (typeof groupId !== "number") {
     return;
   }
 
-  const nextTitle = window.prompt("Rename tab group", currentTitle || "");
-  if (nextTitle === null) {
+  closeContextMenu();
+  renamingGroupId = groupId;
+  renderTabs({ scrollBlock: "center" });
+  selectedIndex = getRowIndexForGroupId(groupId);
+  applyRowState("center");
+  focusGroupRenameInput(groupId);
+}
+
+function cancelRenameGroup(groupId) {
+  if (renamingGroupId !== groupId) {
     return;
   }
 
+  renamingGroupId = null;
+  renderTabs();
+  selectedIndex = getRowIndexForGroupId(groupId);
+  applyRowState();
+}
+
+async function renameGroup(groupId, nextTitle) {
+  if (typeof groupId !== "number" || typeof nextTitle !== "string") {
+    return;
+  }
+
+  const group = getGroupById(groupId);
+  const currentTitle = group?.title || "";
+  const trimmedTitle = nextTitle.trim();
   const selectedTabId = getSelectedTabId();
+  renamingGroupId = null;
+
+  if (trimmedTitle === currentTitle.trim()) {
+    renderTabs();
+    selectedIndex = getRowIndexForGroupId(groupId);
+    applyRowState();
+    return;
+  }
+
   const response = await sendMessage({ type: RENAME_GROUP_MESSAGE, groupId, title: nextTitle }).then((result) =>
     assertResponse(result, "Group rename failed")
   );
@@ -598,26 +643,29 @@ async function openGroupBookmark(groupId, bookmarkId, insertOffset = 0) {
   applyRowState();
 }
 
-async function createGroupForTab(tabId, currentTitle = "") {
+async function createGroupForTab(tabId) {
   if (typeof tabId !== "number") {
     return;
   }
 
-  const selectedTabId = getSelectedTabId();
-  const nextTitle = window.prompt("Create tab group", currentTitle || "New group");
-  if (nextTitle === null) {
-    return;
-  }
-
-  const response = await sendMessage({ type: CREATE_GROUP_MESSAGE, tabId, title: nextTitle }).then((result) =>
+  const response = await sendMessage({ type: CREATE_GROUP_MESSAGE, tabId, title: "New group" }).then((result) =>
     assertResponse(result, "Group create failed")
   );
   setTabs(response.tabs);
+  const createdTab = tabs.find((tab) => tab.id === tabId);
+  const createdGroupId = createdTab?.group?.id;
   refreshDuplicateCounts();
+  if (typeof createdGroupId === "number") {
+    sortMode = "window";
+    renamingGroupId = createdGroupId;
+  }
   refreshVisibleTabs();
-  renderTabs();
-  selectedIndex = getRowIndexForTabId(selectedTabId || tabId);
-  applyRowState();
+  renderTabs({ scrollBlock: "center" });
+  selectedIndex = typeof createdGroupId === "number" ? getRowIndexForGroupId(createdGroupId) : getRowIndexForTabId(tabId);
+  applyRowState("center");
+  if (typeof createdGroupId === "number") {
+    focusGroupRenameInput(createdGroupId);
+  }
 }
 
 function getMoveTabGroupOptions(tab) {
@@ -1343,7 +1391,7 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
     }),
     createContextMenuItem(tab.bookmarked ? "Remove bookmark" : "Bookmark tab", () => toggleBookmark(tab.id)),
     createContextMenuSeparator(),
-    createContextMenuItem("Create new group", () => createGroupForTab(tab.id, tab.group?.title || ""), {
+    createContextMenuItem("Create new group", () => createGroupForTab(tab.id), {
       disabled: !canGroupTab
     }),
     createContextSubmenuItem(
@@ -1405,7 +1453,7 @@ function openGroupContextMenu(group, rowIndex, clientX, clientY) {
     createContextMenuItem("Leave focus mode", leaveFocusGroupMode, { disabled: focusedGroupId === null }),
     createContextMenuSeparator(),
     createContextMenuItem(group.collapsed ? "Expand group" : "Collapse group", () => setGroupCollapsed(group.id, !group.collapsed)),
-    createContextMenuItem("Rename group", () => renameGroup(group.id, group.title || ""))
+    createContextMenuItem("Rename group", () => startRenameGroup(group.id))
   ];
   menu.append(...menuItems);
 
@@ -1509,7 +1557,12 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
   closeContextMenu();
   rows = [];
   tabRows = [];
-  list.replaceChildren();
+  isReplacingListChildren = true;
+  try {
+    list.replaceChildren();
+  } finally {
+    isReplacingListChildren = false;
+  }
   updateSortButtons();
 
   if (visibleTabs.length === 0) {
@@ -1542,12 +1595,66 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
         swatch.className = "swatch";
         swatch.style.background = tab.group ? getGroupSwatchColor(tab.group) : ungroupedColor;
 
-        const sectionTitle = document.createElement("span");
-        sectionTitle.className = "section-title";
         const isCollapsedInSwitcher = Boolean(tab.group?.collapsed && focusedGroupId !== tab.group.id);
-        sectionTitle.textContent = tab.group
+        const sectionTitleText = tab.group
           ? `${tab.group.title || "Unnamed group"}${isCollapsedInSwitcher ? ` (${tabCountsBySectionKey.get(sectionKey) ?? 0} collapsed)` : ""}`
           : "Ungrouped";
+        let sectionTitle = null;
+
+        if (tab.group && renamingGroupId === tab.group.id) {
+          sectionTitle = document.createElement("input");
+          sectionTitle.className = "section-rename-input";
+          sectionTitle.type = "text";
+          sectionTitle.value = tab.group.title || "";
+          sectionTitle.placeholder = "Unnamed group";
+          sectionTitle.dataset.tabcoachRenameGroupId = String(tab.group.id);
+          sectionTitle.setAttribute("aria-label", `Rename ${tab.group.title || "Unnamed group"}`);
+
+          let renameHandled = false;
+          const finishRename = (save) => {
+            if (renameHandled) {
+              return;
+            }
+
+            renameHandled = true;
+            if (save) {
+              void renameGroup(tab.group.id, sectionTitle.value).catch(reportActionError);
+            } else {
+              cancelRenameGroup(tab.group.id);
+            }
+          };
+
+          sectionTitle.addEventListener("pointerdown", (event) => {
+            event.stopPropagation();
+          });
+          sectionTitle.addEventListener("click", (event) => {
+            event.stopPropagation();
+          });
+          sectionTitle.addEventListener("keydown", (event) => {
+            event.stopPropagation();
+            if (event.key === "Enter") {
+              event.preventDefault();
+              finishRename(true);
+              return;
+            }
+
+            if (event.key === "Escape") {
+              event.preventDefault();
+              finishRename(false);
+            }
+          });
+          sectionTitle.addEventListener("blur", () => {
+            if (isReplacingListChildren) {
+              return;
+            }
+
+            finishRename(true);
+          });
+        } else {
+          sectionTitle = document.createElement("span");
+          sectionTitle.className = "section-title";
+          sectionTitle.textContent = sectionTitleText;
+        }
 
         sectionHeader.append(swatch, sectionTitle);
         if (tab.group) {
@@ -1562,7 +1669,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
             "group-rename",
             "✎",
             `Rename ${tab.group.title || "Unnamed group"}`,
-            () => renameGroup(tab.group.id, tab.group.title || "")
+            () => startRenameGroup(tab.group.id)
           );
           const menuButton = createButton(
             "group-menu",
@@ -1804,10 +1911,23 @@ async function loadTabs() {
     focusedGroupId = await loadStoredFocusedGroupId();
     refreshDuplicateCounts();
     refreshVisibleTabs();
+    const activeRenamingGroupId =
+      typeof renamingGroupId === "number" && tabs.some((tab) => tab.group?.id === renamingGroupId) ? renamingGroupId : null;
+    if (renamingGroupId !== null && activeRenamingGroupId === null) {
+      renamingGroupId = null;
+    }
+
     renderTabs({ scrollBlock: "center" });
-    selectedIndex = getRowIndexForTabOrGroup(selectedTabId || visibleTabs.find((tab) => tab.active)?.id);
+    selectedIndex =
+      activeRenamingGroupId !== null
+        ? getRowIndexForGroupId(activeRenamingGroupId)
+        : getRowIndexForTabOrGroup(selectedTabId || visibleTabs.find((tab) => tab.active)?.id);
     applyRowState("center");
-    searchInput.focus();
+    if (activeRenamingGroupId !== null) {
+      focusGroupRenameInput(activeRenamingGroupId);
+    } else {
+      searchInput.focus();
+    }
   } catch (error) {
     setError(error instanceof Error ? error.message : String(error));
   }

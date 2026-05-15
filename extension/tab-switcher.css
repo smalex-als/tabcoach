@@ -245,6 +245,28 @@ body:not(.window-blurred) .section-header-clickable:hover {
   white-space: nowrap;
 }
 
+.section-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid rgba(199, 210, 254, 0.82);
+  border-radius: 6px;
+  background: #111827;
+  color: #f9fafb;
+  padding: 0 9px;
+  font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-transform: none;
+  outline: none;
+}
+
+.section-rename-input:focus {
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.32);
+}
+
+.section-rename-input::placeholder {
+  color: #9ca3af;
+}
+
 .row {
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr) minmax(58px, auto) 34px 34px;
