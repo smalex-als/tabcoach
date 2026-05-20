@@ -51,7 +51,7 @@ Server defaults:
 - `PORT`: `3847`
 - `TAB_SWITCH_LOG_PATH`: `tab-switch-log.jsonl`
 - `TAB_EVENT_LOG_PATH`: `tabcoach-events.jsonl`
-- `DESKTOP_APPS_JSON`: optional desktop app allowlist, defaults to iTerm, IntelliJ IDEA, Obsidian, and WebStorm when unset; set to `[]` to disable desktop app buttons
+- `DESKTOP_APPS_JSON`: optional desktop app allowlist, defaults to Obsidian, iTerm, IntelliJ IDEA, and WebStorm when unset; set to `[]` to disable desktop app buttons
 
 Health check:
 
@@ -117,13 +117,13 @@ The `Command+E` popup loads desktop app buttons from `GET /api/desktop-apps` and
 Default allowlist:
 
 ```json
-[{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"intellij-idea","label":"IntelliJ IDEA","macAppName":"IntelliJ IDEA"},{"id":"obsidian","label":"Obsidian","macAppName":"Obsidian"},{"id":"webstorm","label":"WebStorm","macAppName":"WebStorm"}]
+[{"id":"obsidian","label":"Obsidian","macAppName":"Obsidian"},{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"intellij-idea","label":"IntelliJ IDEA","macAppName":"IntelliJ IDEA"},{"id":"webstorm","label":"WebStorm","macAppName":"WebStorm"}]
 ```
 
 To add more macOS apps, start the server with `DESKTOP_APPS_JSON`:
 
 ```bash
-DESKTOP_APPS_JSON='[{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"intellij-idea","label":"IntelliJ IDEA","macAppName":"IntelliJ IDEA"},{"id":"obsidian","label":"Obsidian","macAppName":"Obsidian"},{"id":"webstorm","label":"WebStorm","macAppName":"WebStorm"},{"id":"notes","label":"Notes","macAppName":"Notes"}]' npm run dev
+DESKTOP_APPS_JSON='[{"id":"obsidian","label":"Obsidian","macAppName":"Obsidian"},{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"intellij-idea","label":"IntelliJ IDEA","macAppName":"IntelliJ IDEA"},{"id":"webstorm","label":"WebStorm","macAppName":"WebStorm"},{"id":"notes","label":"Notes","macAppName":"Notes"}]' npm run dev
 ```
 
 Workspace launch groups can be configured from extension options as JSON:
