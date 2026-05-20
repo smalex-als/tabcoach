@@ -8,7 +8,7 @@ services:
       PORT: 3847
       TAB_SWITCH_LOG_PATH: /data/tab-switch-log.jsonl
       TAB_EVENT_LOG_PATH: /data/tabcoach-events.jsonl
-      DESKTOP_APPS_JSON: "[]"
+      DESKTOP_APPS_JSON: '[{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"intellij-idea","label":"IntelliJ IDEA","macAppName":"IntelliJ IDEA"}]'
     volumes:
       - ./data:/data
     restart: unless-stopped

@@ -67,9 +67,9 @@ Build and start the local server:
 docker compose up --build
 ```
 
-The Compose setup publishes the server at `http://127.0.0.1:3847` and stores logs in the local ignored `data/` folder.
+The Compose setup publishes the server at `http://127.0.0.1:3847`, stores logs in the local ignored `data/` folder, and configures desktop app buttons for iTerm and IntelliJ IDEA.
 
-Desktop app launching is disabled in Docker with `DESKTOP_APPS_JSON=[]` because the container cannot run macOS `open -a` commands on the host. To run with desktop launcher buttons, use `npm run dev` or `npm start` directly on macOS instead.
+Desktop app launching from Docker still depends on the container being able to run the host's macOS `open -a` command. If launches do not work from Docker, run with `npm run dev` or `npm start` directly on macOS instead.
 
 ## Load The Chrome Extension
 
