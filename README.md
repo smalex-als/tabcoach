@@ -51,13 +51,25 @@ Server defaults:
 - `PORT`: `3847`
 - `TAB_SWITCH_LOG_PATH`: `tab-switch-log.jsonl`
 - `TAB_EVENT_LOG_PATH`: `tabcoach-events.jsonl`
-- `DESKTOP_APPS_JSON`: optional desktop app allowlist, defaults to iTerm and IntelliJ IDEA
+- `DESKTOP_APPS_JSON`: optional desktop app allowlist, defaults to iTerm and IntelliJ IDEA when unset; set to `[]` to disable desktop app buttons
 
 Health check:
 
 ```bash
 curl http://127.0.0.1:3847/health
 ```
+
+## Run With Docker
+
+Build and start the local server:
+
+```bash
+docker compose up --build
+```
+
+The Compose setup publishes the server at `http://127.0.0.1:3847` and stores logs in the local ignored `data/` folder.
+
+Desktop app launching is disabled in Docker with `DESKTOP_APPS_JSON=[]` because the container cannot run macOS `open -a` commands on the host. To run with desktop launcher buttons, use `npm run dev` or `npm start` directly on macOS instead.
 
 ## Load The Chrome Extension
 

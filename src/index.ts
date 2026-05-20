@@ -147,7 +147,7 @@ function readDesktopApps(): DesktopApp[] {
       macAppName: app.macAppName.trim()
     }));
 
-    return apps.length > 0 ? apps : DEFAULT_DESKTOP_APPS;
+    return apps;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`Invalid DESKTOP_APPS_JSON; using defaults. ${message}`);

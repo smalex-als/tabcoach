@@ -1,8 +1,8 @@
-node_modules/
-dist/
+node_modules
+dist
+npm-debug.log
 .DS_Store
-.idea/
+.git
 tab-switch-log.jsonl
 tabcoach-events.jsonl
-data/
-code-repos.md
+
