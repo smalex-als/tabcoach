@@ -77,6 +77,16 @@ const DEFAULT_DESKTOP_APPS: DesktopApp[] = [
     id: "intellij-idea",
     label: "IntelliJ IDEA",
     macAppName: "IntelliJ IDEA"
+  },
+  {
+    id: "obsidian",
+    label: "Obsidian",
+    macAppName: "Obsidian"
+  },
+  {
+    id: "webstorm",
+    label: "WebStorm",
+    macAppName: "WebStorm"
   }
 ];
 
