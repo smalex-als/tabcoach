@@ -4,6 +4,7 @@ const DEFAULT_SETTINGS = {
   fetchDiagnostics: true,
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
+  showRecentTabIndent: true,
   badgeMode: "both",
   workspaceLaunchGroups: []
 };
@@ -18,6 +19,7 @@ const fields = {
   fetchDiagnostics: document.getElementById("fetchDiagnostics"),
   syncIntervalMinutes: document.getElementById("syncIntervalMinutes"),
   switcherOpenLeft: document.getElementById("switcherOpenLeft"),
+  showRecentTabIndent: document.getElementById("showRecentTabIndent"),
   badgeMode: document.getElementById("badgeMode"),
   workspaceLaunchGroups: document.getElementById("workspaceLaunchGroups")
 };
@@ -127,6 +129,7 @@ function readFormSettings(workspaceLaunchGroups) {
     fetchDiagnostics: fields.fetchDiagnostics.checked,
     syncIntervalMinutes: Number(fields.syncIntervalMinutes.value),
     switcherOpenLeft: fields.switcherOpenLeft.checked,
+    showRecentTabIndent: fields.showRecentTabIndent.checked,
     badgeMode: fields.badgeMode.value,
     workspaceLaunchGroups
   };
@@ -138,6 +141,7 @@ function writeFormSettings(settings) {
   fields.fetchDiagnostics.checked = Boolean(settings.fetchDiagnostics);
   fields.syncIntervalMinutes.value = String(settings.syncIntervalMinutes);
   fields.switcherOpenLeft.checked = Boolean(settings.switcherOpenLeft);
+  fields.showRecentTabIndent.checked = settings.showRecentTabIndent !== false;
   fields.badgeMode.value = settings.badgeMode;
   fields.workspaceLaunchGroups.value = JSON.stringify(settings.workspaceLaunchGroups || [], null, 2);
 }

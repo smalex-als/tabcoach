@@ -4,6 +4,7 @@ const DEFAULT_SETTINGS = {
   fetchDiagnostics: true,
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
+  showRecentTabIndent: true,
   badgeMode: "both",
   workspaceLaunchGroups: []
 };
@@ -170,6 +171,7 @@ function sanitizeSettings(settings) {
     fetchDiagnostics: Boolean(settings.fetchDiagnostics),
     syncIntervalMinutes: Number.isFinite(syncIntervalMinutes) && syncIntervalMinutes >= 1 ? syncIntervalMinutes : DEFAULT_SETTINGS.syncIntervalMinutes,
     switcherOpenLeft: Boolean(settings.switcherOpenLeft),
+    showRecentTabIndent: settings.showRecentTabIndent !== false,
     badgeMode: badgeModes.has(settings.badgeMode) ? settings.badgeMode : DEFAULT_SETTINGS.badgeMode,
     workspaceLaunchGroups: sanitizeWorkspaceLaunchGroups(settings.workspaceLaunchGroups)
   };

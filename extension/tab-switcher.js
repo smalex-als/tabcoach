@@ -26,6 +26,7 @@ const GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE = "tabcoach:get-workspace-launch-group
 const LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE = "tabcoach:launch-workspace-launch-group";
 const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCHER_OPEN_LEFT_KEY = "switcherOpenLeft";
+const SHOW_RECENT_TAB_INDENT_KEY = "showRecentTabIndent";
 const FOCUSED_GROUPS_KEY = "focusedGroupIdsByWindow";
 const TAB_LABELS_KEY = "tabLabelsByWindow";
 
@@ -90,6 +91,7 @@ let renamingGroupId = null;
 let editingLabelTabId = null;
 let editingLabelDraft = "";
 let keepOpenAfterSwitch = false;
+let showRecentTabIndent = true;
 let draggedTabId = null;
 let dropTarget = null;
 let refreshTimer = null;
@@ -2257,7 +2259,7 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     row.dataset.tabcoachGroupId = String(tab.group?.id ?? -1);
     row.dataset.active = String(Boolean(tab.active));
     row.title = "";
-    if (showGroupSections && tab.group) {
+    if (showRecentTabIndent && showGroupSections && tab.group) {
       const recencyRank = recencyRanksByTabId.get(tab.id) ?? 0;
       if (recencyRank > 0) {
         row.classList.add("row-recency-ladder");
@@ -2515,9 +2517,14 @@ async function loadTabs() {
     const response = await sendMessage({ type: GET_TAB_SWITCHER_ITEMS_MESSAGE }).then((result) =>
       assertResponse(result, "Could not load tabs")
     );
-    const stored = await chrome.storage.sync.get({ [NUMERIC_BOOKMARKS_KEY]: {}, [SWITCHER_OPEN_LEFT_KEY]: false });
+    const stored = await chrome.storage.sync.get({
+      [NUMERIC_BOOKMARKS_KEY]: {},
+      [SWITCHER_OPEN_LEFT_KEY]: false,
+      [SHOW_RECENT_TAB_INDENT_KEY]: true
+    });
     numericBookmarks = stored[NUMERIC_BOOKMARKS_KEY] || {};
     keepOpenAfterSwitch = Boolean(stored[SWITCHER_OPEN_LEFT_KEY]);
+    showRecentTabIndent = stored[SHOW_RECENT_TAB_INDENT_KEY] !== false;
     refreshNumericBookmarkSlots();
     tabLabelsByUrl = await loadStoredTabLabels();
     setTabs(response.tabs);
@@ -2576,13 +2583,18 @@ newTabButton.addEventListener("click", () => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "sync" || !changes[NUMERIC_BOOKMARKS_KEY]) {
+  if (areaName !== "sync" || (!changes[NUMERIC_BOOKMARKS_KEY] && !changes[SHOW_RECENT_TAB_INDENT_KEY])) {
     return;
   }
 
   const selectedTabId = getSelectedTabId();
-  numericBookmarks = changes[NUMERIC_BOOKMARKS_KEY].newValue || {};
-  refreshNumericBookmarkSlots();
+  if (changes[NUMERIC_BOOKMARKS_KEY]) {
+    numericBookmarks = changes[NUMERIC_BOOKMARKS_KEY].newValue || {};
+    refreshNumericBookmarkSlots();
+  }
+  if (changes[SHOW_RECENT_TAB_INDENT_KEY]) {
+    showRecentTabIndent = changes[SHOW_RECENT_TAB_INDENT_KEY].newValue !== false;
+  }
   renderTabs();
   selectedIndex = getRowIndexForTabOrGroup(selectedTabId);
   applyRowState();

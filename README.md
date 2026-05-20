@@ -87,6 +87,7 @@ The extension will:
 
 Extension settings are available from `chrome://extensions` -> `Tabcoach` -> `Details` -> `Extension options`.
 Settings include an option to open the `Command+E` tab switcher as a left-side window next to the current Chrome window. In left-side mode, selecting a tab keeps the switcher open while focus moves to the selected tab.
+Settings also include an option to show or hide the right indent for recently active tabs inside tab groups.
 Use the `Stats` button in extension options to open tab movement statistics.
 
 The `Command+E` popup includes a `+` button that opens a new tab before the currently active tab in the source window. If the active tab is in a Chrome tab group, the new tab is added to the same group.
