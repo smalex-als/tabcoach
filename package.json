@@ -8,7 +8,6 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "host-launcher": "tsx src/host-launcher.ts",
     "check": "tsc --noEmit -p tsconfig.json"
   },
   "engines": {
