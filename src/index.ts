@@ -87,6 +87,11 @@ const DEFAULT_DESKTOP_APPS: DesktopApp[] = [
     id: "webstorm",
     label: "WebStorm",
     macAppName: "WebStorm"
+  },
+  {
+    id: "pycharm",
+    label: "PyCharm",
+    macAppName: "PyCharm"
   }
 ];
 
