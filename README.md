@@ -69,7 +69,13 @@ docker compose up --build
 
 The Compose setup publishes the server at `http://127.0.0.1:3847`, stores logs in the local ignored `data/` folder, and uses the server's default desktop app buttons.
 
-Desktop app launching from Docker still depends on the container being able to run the host's macOS `open -a` command. If launches do not work from Docker, run with `npm run dev` or `npm start` directly on macOS instead.
+Desktop app launching from Docker needs a small host helper because the container cannot run macOS `open -a` directly. Run this on macOS in another terminal before clicking desktop app buttons:
+
+```bash
+npm run host-launcher
+```
+
+The Docker server forwards launch requests to `http://host.docker.internal:3848/api/desktop-apps/launch`.
 
 ## Load The Chrome Extension
 

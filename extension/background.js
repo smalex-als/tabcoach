@@ -2135,7 +2135,17 @@ async function launchDesktopAppFromServer(appId) {
   });
 
   if (!response.ok) {
-    throw new Error(`Desktop app server returned ${response.status}`);
+    let message = `Desktop app server returned ${response.status}`;
+    try {
+      const result = await response.json();
+      if (typeof result?.error === "string" && result.error.length > 0) {
+        message = result.error;
+      }
+    } catch {
+      // Keep the HTTP status fallback when the server does not return JSON.
+    }
+
+    throw new Error(message);
   }
 
   return response.json();

@@ -29,6 +29,7 @@ type Config = {
   tabSwitchLogPath: string;
   tabEventLogPath: string;
   desktopApps: DesktopApp[];
+  desktopAppLaunchProxyUrl?: string;
   dropHash: boolean;
   sortQueryParams: boolean;
   stripTrackingParams: boolean;
@@ -172,6 +173,7 @@ function loadConfig(): Config {
     tabSwitchLogPath: process.env.TAB_SWITCH_LOG_PATH ?? "tab-switch-log.jsonl",
     tabEventLogPath: process.env.TAB_EVENT_LOG_PATH ?? "tabcoach-events.jsonl",
     desktopApps: readDesktopApps(),
+    desktopAppLaunchProxyUrl: process.env.DESKTOP_APP_LAUNCH_PROXY_URL,
     dropHash: readBoolean("DROP_HASH", true),
     sortQueryParams: readBoolean("SORT_QUERY_PARAMS", true),
     stripTrackingParams: readBoolean("STRIP_TRACKING_PARAMS", true)
@@ -269,7 +271,43 @@ function findDesktopApp(appId: string, config: Config): DesktopApp | undefined {
   return config.desktopApps.find((app) => app.id === appId);
 }
 
-async function launchDesktopApp(app: DesktopApp): Promise<void> {
+async function proxyDesktopAppLaunch(app: DesktopApp, proxyUrl: string): Promise<void> {
+  const response = await fetch(proxyUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      id: app.id,
+      label: app.label,
+      macAppName: app.macAppName
+    })
+  });
+
+  if (!response.ok) {
+    let message = `desktop app launch proxy returned ${response.status}`;
+    try {
+      const body = (await response.json()) as { error?: unknown };
+      if (typeof body.error === "string" && body.error.length > 0) {
+        message = body.error;
+      }
+    } catch {
+      const text = await response.text();
+      if (text.length > 0) {
+        message = text;
+      }
+    }
+
+    throw new Error(message);
+  }
+}
+
+async function launchDesktopApp(app: DesktopApp, config: Config): Promise<void> {
+  if (config.desktopAppLaunchProxyUrl) {
+    await proxyDesktopAppLaunch(app, config.desktopAppLaunchProxyUrl);
+    return;
+  }
+
   if (process.platform !== "darwin") {
     throw new Error("Desktop app launching is currently supported only on macOS");
   }
@@ -618,7 +656,7 @@ async function handleDesktopAppLaunch(request: IncomingMessage, response: Server
     return;
   }
 
-  await launchDesktopApp(app);
+  await launchDesktopApp(app, config);
 
   console.log(
     `[${new Date().toISOString()}] desktop app launch from ${payload.source ?? "unknown"}: ${app.label} (${app.macAppName})`
