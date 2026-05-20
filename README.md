@@ -67,7 +67,7 @@ Build and start the local server:
 docker compose up --build
 ```
 
-The Compose setup publishes the server at `http://127.0.0.1:3847`, stores logs in the local ignored `data/` folder, and configures desktop app buttons for iTerm, IntelliJ IDEA, Obsidian, and WebStorm.
+The Compose setup publishes the server at `http://127.0.0.1:3847`, stores logs in the local ignored `data/` folder, and uses the server's default desktop app buttons.
 
 Desktop app launching from Docker still depends on the container being able to run the host's macOS `open -a` command. If launches do not work from Docker, run with `npm run dev` or `npm start` directly on macOS instead.
 
