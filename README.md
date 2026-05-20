@@ -1,9 +1,9 @@
 # Tabcoach
 
-Tabcoach is a two-part setup:
+Tabcoach can run as a Chrome extension by itself, with an optional local server for logs, stats, and desktop app launching:
 
-- a local TypeScript server that receives tab snapshots and records tab switch activity
-- a Chrome extension that reads open tabs and sends them to that server
+- a Chrome extension that reads open tabs and provides the tab switcher
+- an optional local TypeScript server that receives tab snapshots, records tab switch activity, and launches desktop apps
 
 ## What It Does
 
@@ -11,7 +11,7 @@ Tabcoach is a two-part setup:
 - Detects duplicate tabs by normalized URL
 - Auto-closes duplicate tabs conservatively when enabled
 - Provides a keyboard-driven tab switcher with grouping, search, bookmarks, and tab actions
-- Records tab switch stats and tab events locally
+- Records tab switch stats and tab events locally when the optional server is enabled
 
 ## Project Layout
 
@@ -31,6 +31,8 @@ npm install
 ```
 
 ## Run The Local Server
+
+The extension works without this process. Run the server only when you want JSONL logs, the stats page, or desktop app launcher buttons.
 
 Development:
 
@@ -72,7 +74,7 @@ The extension will:
 - sync when tabs are created, updated, removed, or activated
 - sync every minute
 - auto-close duplicate tabs conservatively
-- show server health and duplicate-group count as extension badge text
+- show server health when the local server is enabled, or local duplicate-group count when it is disabled
 - show, create, drag-reorder, group, bookmark, copy URLs, close, and switch between tabs in the current window with `Command+E` on macOS, including inline duplicate indicators, tab group labels, search, and recently visited sorting
 - use toolbar actions in the `Command+E` popup to create a group, move to a group, ungroup, or duplicate the currently selected tab
 - collapse, expand, and rename tab groups directly from the `Command+E` popup
@@ -80,12 +82,13 @@ The extension will:
 - assign numeric tab bookmark 1 from any page with `Ctrl+Shift+1` (`Control+Shift+1` on macOS), then jump with `Ctrl+1`; slots 0 through 9 are available as extension commands and can be assigned in `chrome://extensions/shortcuts`; saved numeric bookmarks show a small in-page notification; the `Command+E` popup supports slots 0 through 9
 - store bookmarks under `Tabcoach/<tab group name>` to keep saved tabs organized
 - show optional app bookmark buttons that open a configured URL in the currently selected tab group
-- show desktop app launcher buttons at the bottom of the `Command+E` popup; by default, the `iTerm`, `IntelliJ IDEA`, `Obsidian`, and `WebStorm` buttons ask the local server to run `open -a` for those apps
+- show desktop app launcher buttons at the bottom of the `Command+E` popup when the local server is enabled; by default, the `iTerm`, `IntelliJ IDEA`, `Obsidian`, and `WebStorm` buttons ask the local server to run `open -a` for those apps
 - show optional workspace launch buttons that open configured URLs as a new Chrome tab group
 - keep a per-window activation history and expose previous/next history commands for jumping backward and forward between recently active tabs in the same window
 - show a tab movement statistics page from extension options, backed by the local tab switch log
 
 Extension settings are available from `chrome://extensions` -> `Tabcoach` -> `Details` -> `Extension options`.
+Turn off `Use local server integration` to run the extension without `npm run dev`; server-backed stats, JSONL logging, and desktop app launcher buttons are disabled in that mode.
 Settings include an option to open the `Command+E` tab switcher as a left-side window next to the current Chrome window. In left-side mode, selecting a tab keeps the switcher open while focus moves to the selected tab.
 Settings also include an option to show or hide the right indent for recently active tabs inside tab groups.
 Use the `Stats` button in extension options to open tab movement statistics.
@@ -107,13 +110,13 @@ Auto-close rules:
 
 ## Tab Switch Log
 
-Switching tabs through the `Command+E` popup posts to `POST /api/tab-switch`. The server appends JSON Lines to local `tab-switch-log.jsonl` by default, including timestamp, source, previous tab, and target tab.
+When local server integration is enabled, switching tabs through the `Command+E` popup posts to `POST /api/tab-switch`. The server appends JSON Lines to local `tab-switch-log.jsonl` by default, including timestamp, source, previous tab, and target tab.
 The stats page reads aggregates from `GET /api/tab-switch-stats`, including totals, today, last 7 days, average switches per day, daily counts for the last 7 days, today-specific routes and domain breakdowns, estimated focus time by domain, top target domains, top routes, sources, and recent switches with estimated time spent. Focus intervals longer than 15 minutes are treated as idle and excluded from time totals.
-Copying a tab URL through the popup posts to `POST /api/tab-event`. The server appends JSON Lines to local `tabcoach-events.jsonl` by default.
+Copying a tab URL through the popup posts to `POST /api/tab-event`. The server appends JSON Lines to local `tabcoach-events.jsonl` by default. When local server integration is disabled, these server-backed logs and stats are skipped.
 
 ## Desktop App Launcher
 
-The `Command+E` popup loads desktop app buttons from `GET /api/desktop-apps` and launches them through `POST /api/desktop-apps/launch`.
+When local server integration is enabled, the `Command+E` popup loads desktop app buttons from `GET /api/desktop-apps` and launches them through `POST /api/desktop-apps/launch`.
 
 Default allowlist:
 

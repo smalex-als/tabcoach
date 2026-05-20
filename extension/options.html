@@ -16,9 +16,13 @@
       <form class="settings" id="settingsForm">
         <section class="section">
           <h2>Server</h2>
+          <label class="toggle">
+            <input id="localServerEnabled" name="localServerEnabled" type="checkbox">
+            <span>Use local server integration</span>
+          </label>
           <label class="field">
             <span>Server URL</span>
-            <input id="serverBaseUrl" name="serverBaseUrl" type="url" required>
+            <input id="serverBaseUrl" name="serverBaseUrl" type="url">
           </label>
           <label class="field compact">
             <span>Sync interval (minutes)</span>

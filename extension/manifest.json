@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Tabcoach",
   "version": "0.1.0",
-  "description": "Sync open Chrome tabs to a local Tabcoach server.",
+  "description": "Keyboard-driven Chrome tab switching with optional local Tabcoach server sync.",
   "permissions": ["tabs", "tabGroups", "alarms", "scripting", "activeTab", "bookmarks", "clipboardWrite", "storage"],
   "options_ui": {
     "page": "options.html",

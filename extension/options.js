@@ -1,4 +1,5 @@
 const DEFAULT_SETTINGS = {
+  localServerEnabled: true,
   serverBaseUrl: "http://127.0.0.1:3847",
   autoCloseDuplicates: true,
   fetchDiagnostics: true,
@@ -14,6 +15,7 @@ const status = document.getElementById("status");
 const resetButton = document.getElementById("resetButton");
 const statsButton = document.getElementById("statsButton");
 const fields = {
+  localServerEnabled: document.getElementById("localServerEnabled"),
   serverBaseUrl: document.getElementById("serverBaseUrl"),
   autoCloseDuplicates: document.getElementById("autoCloseDuplicates"),
   fetchDiagnostics: document.getElementById("fetchDiagnostics"),
@@ -124,6 +126,7 @@ function readWorkspaceLaunchGroups() {
 
 function readFormSettings(workspaceLaunchGroups) {
   return {
+    localServerEnabled: fields.localServerEnabled.checked,
     serverBaseUrl: sanitizeServerBaseUrl(fields.serverBaseUrl.value),
     autoCloseDuplicates: fields.autoCloseDuplicates.checked,
     fetchDiagnostics: fields.fetchDiagnostics.checked,
@@ -136,6 +139,7 @@ function readFormSettings(workspaceLaunchGroups) {
 }
 
 function writeFormSettings(settings) {
+  fields.localServerEnabled.checked = settings.localServerEnabled !== false;
   fields.serverBaseUrl.value = settings.serverBaseUrl;
   fields.autoCloseDuplicates.checked = Boolean(settings.autoCloseDuplicates);
   fields.fetchDiagnostics.checked = Boolean(settings.fetchDiagnostics);
@@ -144,6 +148,13 @@ function writeFormSettings(settings) {
   fields.showRecentTabIndent.checked = settings.showRecentTabIndent !== false;
   fields.badgeMode.value = settings.badgeMode;
   fields.workspaceLaunchGroups.value = JSON.stringify(settings.workspaceLaunchGroups || [], null, 2);
+  updateServerFieldState();
+}
+
+function updateServerFieldState() {
+  const enabled = fields.localServerEnabled.checked;
+  fields.serverBaseUrl.disabled = !enabled;
+  fields.fetchDiagnostics.disabled = !enabled;
 }
 
 async function loadSettings() {
@@ -162,7 +173,7 @@ form.addEventListener("submit", (event) => {
 
   const settings = readFormSettings(workspaceResult.groups);
 
-  if (!settings.serverBaseUrl) {
+  if (settings.localServerEnabled && !settings.serverBaseUrl) {
     fields.serverBaseUrl.focus();
     return;
   }
@@ -188,5 +199,7 @@ resetButton.addEventListener("click", () => {
 statsButton.addEventListener("click", () => {
   void chrome.tabs.create({ url: chrome.runtime.getURL("stats.html") });
 });
+
+fields.localServerEnabled.addEventListener("change", updateServerFieldState);
 
 void loadSettings();

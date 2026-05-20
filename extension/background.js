@@ -1,4 +1,5 @@
 const DEFAULT_SETTINGS = {
+  localServerEnabled: true,
   serverBaseUrl: "http://127.0.0.1:3847",
   autoCloseDuplicates: true,
   fetchDiagnostics: true,
@@ -166,6 +167,7 @@ function sanitizeSettings(settings) {
   const badgeModes = new Set(["both", "health", "duplicates"]);
 
   return {
+    localServerEnabled: settings.localServerEnabled !== false,
     serverBaseUrl,
     autoCloseDuplicates: Boolean(settings.autoCloseDuplicates),
     fetchDiagnostics: Boolean(settings.fetchDiagnostics),
@@ -511,9 +513,32 @@ async function setServerHealth(ok, message, badgeText = "") {
   await chrome.action.setTitle({ title: `${ACTION_TITLE}: server error - ${message}` });
 }
 
+async function setLocalModeBadge(badgeText = "") {
+  const settings = await getSettings();
+  const visibleBadgeText =
+    settings.badgeMode === "health" ? "OFF" : settings.badgeMode === "duplicates" ? badgeText : badgeText || "";
+
+  lastServerHealth = {
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    message: "Local server disabled",
+    badgeText: visibleBadgeText
+  };
+
+  await chrome.action.setBadgeBackgroundColor({ color: badgeText ? "#b42318" : "#4b5563" });
+  await chrome.action.setBadgeText({ text: visibleBadgeText });
+  await chrome.action.setTitle({ title: `${ACTION_TITLE}: local server disabled` });
+}
+
 async function restoreServerHealthBadge() {
   if (lastServerHealth.ok === true) {
     await chrome.action.setBadgeText({ text: lastServerHealth.badgeText });
+    if (lastServerHealth.message === "Local server disabled") {
+      await chrome.action.setBadgeBackgroundColor({ color: lastServerHealth.badgeText ? "#b42318" : "#4b5563" });
+      await chrome.action.setTitle({ title: `${ACTION_TITLE}: local server disabled` });
+      return;
+    }
+
     await chrome.action.setBadgeBackgroundColor({ color: lastServerHealth.badgeText ? "#b42318" : "#15803d" });
     await chrome.action.setTitle({ title: `${ACTION_TITLE}: server ok` });
     return;
@@ -736,6 +761,14 @@ async function pushSnapshot(reason) {
     const settings = await getSettings();
     const tabs = await collectTabs();
     await closeDuplicateTabs(tabs, settings);
+    const localDuplicateGroups = findDuplicateGroups(tabs);
+
+    if (!settings.localServerEnabled) {
+      const badgeText = localDuplicateGroups.length > 0 ? String(localDuplicateGroups.length) : "";
+      await setLocalModeBadge(badgeText);
+      return;
+    }
+
     const response = await fetchLocalServer("sync", SYNC_ENDPOINT, {
       method: "POST",
       headers: {
@@ -1507,7 +1540,22 @@ async function switchToTab(tabId, context = {}) {
 
   await chrome.tabs.update(tabId, { active: true });
 
-  void fetchLocalServer("tab-switch-log", TAB_SWITCH_LOG_ENDPOINT, {
+  void logTabSwitchToServer(context, fromTab, targetTab).catch((error) => {
+    console.warn("Tabcoach tab switch log failed", error);
+  });
+
+  if (typeof targetTab.windowId === "number") {
+    await chrome.windows.update(targetTab.windowId, { focused: true });
+  }
+}
+
+async function logTabSwitchToServer(context, fromTab, targetTab) {
+  const settings = await getSettings();
+  if (!settings.localServerEnabled) {
+    return;
+  }
+
+  const response = await fetchLocalServer("tab-switch-log", TAB_SWITCH_LOG_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -1518,12 +1566,10 @@ async function switchToTab(tabId, context = {}) {
       from: fromTab ? normalizeTab(fromTab) : null,
       to: normalizeTab(targetTab)
     })
-  }).catch((error) => {
-    console.warn("Tabcoach tab switch log failed", error);
   });
 
-  if (typeof targetTab.windowId === "number") {
-    await chrome.windows.update(targetTab.windowId, { focused: true });
+  if (!response.ok) {
+    throw new Error(`Tab switch log server returned ${response.status}`);
   }
 }
 
@@ -2082,6 +2128,11 @@ async function copyTabUrlFromSwitcher(tabId, url, context = {}) {
 }
 
 async function logTabEventFromSwitcher(payload) {
+  const settings = await getSettings();
+  if (!settings.localServerEnabled) {
+    return;
+  }
+
   const response = await fetchLocalServer("tab-event-log", TAB_EVENT_LOG_ENDPOINT, {
     method: "POST",
     headers: {
@@ -2101,7 +2152,33 @@ async function logTabEventFromSwitcher(payload) {
   }
 }
 
+function getEmptyTabSwitchStats() {
+  return {
+    generatedAt: new Date().toISOString(),
+    logPath: "local server disabled",
+    totalSwitches: 0,
+    todaySwitches: 0,
+    sevenDaySwitches: 0,
+    averageSwitchesPerDay7d: 0,
+    totalTrackedFocusTimeMs: 0,
+    todayTopTimeByDomain: [],
+    todayTopTargetDomains: [],
+    todayTopRoutes: [],
+    topTimeByDomain: [],
+    lastSevenDays: [],
+    topTargetDomains: [],
+    topRoutes: [],
+    topSources: [],
+    recentSwitches: []
+  };
+}
+
 async function getTabSwitchStatsFromServer() {
+  const settings = await getSettings();
+  if (!settings.localServerEnabled) {
+    return getEmptyTabSwitchStats();
+  }
+
   const response = await fetchLocalServer("tab-switch-stats", TAB_SWITCH_STATS_ENDPOINT);
   if (!response.ok) {
     throw new Error(`Tab switch stats server returned ${response.status}`);
@@ -2111,6 +2188,11 @@ async function getTabSwitchStatsFromServer() {
 }
 
 async function getDesktopAppsFromServer() {
+  const settings = await getSettings();
+  if (!settings.localServerEnabled) {
+    return [];
+  }
+
   const response = await fetchLocalServer("desktop-apps", DESKTOP_APPS_ENDPOINT);
   if (!response.ok) {
     throw new Error(`Desktop apps server returned ${response.status}`);
@@ -2121,6 +2203,11 @@ async function getDesktopAppsFromServer() {
 }
 
 async function launchDesktopAppFromServer(appId) {
+  const settings = await getSettings();
+  if (!settings.localServerEnabled) {
+    throw new Error("Local server integration is disabled");
+  }
+
   if (typeof appId !== "string" || appId.length === 0) {
     throw new Error("Invalid desktop app id");
   }
