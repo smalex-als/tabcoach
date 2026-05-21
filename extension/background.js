@@ -2250,7 +2250,7 @@ async function resolveAppBookmarkWindowId(context = {}) {
   throw new Error("Invalid window id");
 }
 
-async function openAppBookmarkInGroup(bookmarkId, groupId, context = {}) {
+async function openAppBookmarkInGroup(bookmarkId, groupId, insertIndex = null, context = {}) {
   const bookmarks = await getAppBookmarks();
   const bookmark = bookmarks.find((item) => item.id === bookmarkId);
   if (!bookmark) {
@@ -2282,14 +2282,17 @@ async function openAppBookmarkInGroup(bookmarkId, groupId, context = {}) {
     : windowTabs
         .filter((tab) => tab.groupId === targetGroupId)
         .sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
-  const insertIndex = targetGroupId === null
-    ? typeof activeTab?.index === "number" ? activeTab.index + 1 : windowTabs.length
-    : groupTabs.length > 0
-      ? Math.max(...groupTabs.map((tab) => (typeof tab.index === "number" ? tab.index : 0))) + 1
-      : typeof activeTab?.index === "number" ? activeTab.index + 1 : windowTabs.length;
+  const requestedInsertIndex = Number.isInteger(insertIndex) && insertIndex >= 0 ? insertIndex : null;
+  const targetInsertIndex = requestedInsertIndex ?? (
+    targetGroupId === null
+      ? typeof activeTab?.index === "number" ? activeTab.index + 1 : windowTabs.length
+      : groupTabs.length > 0
+        ? Math.max(...groupTabs.map((tab) => (typeof tab.index === "number" ? tab.index : 0))) + 1
+        : typeof activeTab?.index === "number" ? activeTab.index + 1 : windowTabs.length
+  );
   const tab = await chrome.tabs.create({
     windowId,
-    index: Math.min(windowTabs.length, insertIndex),
+    index: Math.min(windowTabs.length, targetInsertIndex),
     url: bookmark.url,
     active: true
   });
@@ -2672,7 +2675,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === OPEN_APP_BOOKMARK_MESSAGE) {
-    void openAppBookmarkInGroup(message.bookmarkId, message.groupId, switcherContext)
+    void openAppBookmarkInGroup(message.bookmarkId, message.groupId, message.insertIndex, switcherContext)
       .then((result) => {
         sendResponse({ ok: true, ...result });
       })

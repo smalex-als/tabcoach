@@ -97,6 +97,8 @@ let suppressNextRowClick = false;
 let pointerDownRowIndex = null;
 let contextMenu = null;
 let isReplacingListChildren = false;
+let draggedAppBookmarkId = null;
+let appBookmarkDropTarget = null;
 const expandedBookmarkGroupIds = new Set();
 
 function sendMessage(message) {
@@ -1198,6 +1200,10 @@ function getSafeAppBookmarks(bookmarks) {
     : [];
 }
 
+function getAppBookmarkById(bookmarkId) {
+  return appBookmarks.find((bookmark) => bookmark.id === bookmarkId) ?? null;
+}
+
 function getHostnameForIcon(rawUrl) {
   try {
     return new URL(rawUrl).hostname.replace(/^www\./, "");
@@ -1283,19 +1289,28 @@ async function launchWorkspaceLaunchGroup(group, button) {
 
 async function openAppBookmark(bookmark, button) {
   const groupId = getSelectedGroupId();
-  const originalText = button.textContent;
-  const usesRichButton = button.classList.contains("app-launcher-item");
-  button.disabled = true;
-  button.setAttribute("aria-busy", "true");
-  if (!usesRichButton) {
-    button.textContent = "...";
+  await openAppBookmarkInGroup(bookmark, groupId, button);
+}
+
+async function openAppBookmarkInGroup(bookmark, groupId, button = null, insertIndex = null) {
+  const originalText = button?.textContent ?? "";
+  const usesRichButton = button?.classList.contains("app-launcher-item");
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    if (!usesRichButton) {
+      button.textContent = "...";
+    }
   }
   setDesktopAppStatus("");
 
   try {
-    const response = await sendMessage({ type: OPEN_APP_BOOKMARK_MESSAGE, bookmarkId: bookmark.id, groupId }).then((result) =>
-      assertResponse(result, `Could not open ${bookmark.label}`)
-    );
+    const response = await sendMessage({
+      type: OPEN_APP_BOOKMARK_MESSAGE,
+      bookmarkId: bookmark.id,
+      groupId,
+      insertIndex
+    }).then((result) => assertResponse(result, `Could not open ${bookmark.label}`));
     if (Array.isArray(response.tabs)) {
       setTabs(response.tabs);
       refreshDuplicateCounts();
@@ -1305,22 +1320,26 @@ async function openAppBookmark(bookmark, button) {
       applyRowState();
     }
 
-    if (!usesRichButton) {
+    if (button && !usesRichButton) {
       button.textContent = "✓";
     }
-    setTimeout(() => {
+    if (button) {
+      setTimeout(() => {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        if (!usesRichButton) {
+          button.textContent = originalText;
+        }
+      }, 700);
+    }
+    closeAfterSwitchIfNeeded();
+  } catch (error) {
+    if (button) {
       button.disabled = false;
       button.removeAttribute("aria-busy");
       if (!usesRichButton) {
         button.textContent = originalText;
       }
-    }, 700);
-    closeAfterSwitchIfNeeded();
-  } catch (error) {
-    button.disabled = false;
-    button.removeAttribute("aria-busy");
-    if (!usesRichButton) {
-      button.textContent = originalText;
     }
     console.error("Tabcoach app bookmark open failed", error);
     setDesktopAppStatus(error instanceof Error ? error.message : String(error), "error");
@@ -1378,6 +1397,8 @@ function renderLaunchers() {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "app-launcher-item";
+        button.draggable = true;
+        button.dataset.tabcoachAppBookmarkId = bookmark.id;
         button.title = `Open ${bookmark.label} in selected group`;
         button.setAttribute("aria-label", `Open ${bookmark.label} in selected group`);
         const icon = document.createElement("span");
@@ -1399,6 +1420,20 @@ function renderLaunchers() {
         button.append(icon, label, meta);
         button.addEventListener("click", () => {
           void openAppBookmark(bookmark, button);
+        });
+        button.addEventListener("dragstart", (event) => {
+          draggedAppBookmarkId = bookmark.id;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", bookmark.id);
+          button.classList.add("app-launcher-item-dragging");
+        });
+        button.addEventListener("dragend", () => {
+          draggedAppBookmarkId = null;
+          clearAppBookmarkDropTarget();
+          button.classList.remove("app-launcher-item-dragging");
+          document.querySelectorAll(".section-header-app-drop").forEach((row) => {
+            row.classList.remove("section-header-app-drop");
+          });
         });
         bookmarkGrid.appendChild(button);
       });
@@ -1524,6 +1559,23 @@ function clearDropTarget() {
   tabRows.forEach((row) => {
     row.classList.remove("drop-before", "drop-after");
   });
+}
+
+function clearAppBookmarkDropTarget() {
+  appBookmarkDropTarget = null;
+  tabRows.forEach((row) => {
+    row.classList.remove("drop-before", "drop-after");
+  });
+}
+
+function updateAppBookmarkDropTarget(row, tab, position) {
+  clearAppBookmarkDropTarget();
+  appBookmarkDropTarget = {
+    groupId: Number.isInteger(tab.group?.id) ? tab.group.id : null,
+    insertIndex: typeof tab.index === "number" ? tab.index + (position === "after" ? 1 : 0) : null,
+    position
+  };
+  row.classList.add(position === "before" ? "drop-before" : "drop-after");
 }
 
 function updateDropTarget(row, position) {
@@ -2151,6 +2203,40 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
             event.stopPropagation();
             openGroupContextMenu(tab.group, rowIndex, event.clientX, event.clientY);
           });
+          sectionHeader.addEventListener("dragover", (event) => {
+            if (draggedAppBookmarkId === null) {
+              return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = "move";
+            sectionHeader.classList.add("section-header-app-drop");
+          });
+          sectionHeader.addEventListener("dragleave", (event) => {
+            if (event.relatedTarget instanceof Node && sectionHeader.contains(event.relatedTarget)) {
+              return;
+            }
+
+            sectionHeader.classList.remove("section-header-app-drop");
+          });
+          sectionHeader.addEventListener("drop", (event) => {
+            if (draggedAppBookmarkId === null) {
+              return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            sectionHeader.classList.remove("section-header-app-drop");
+            const bookmark = getAppBookmarkById(draggedAppBookmarkId);
+            draggedAppBookmarkId = null;
+            if (!bookmark) {
+              setDesktopAppStatus("App bookmark not found", "error");
+              return;
+            }
+
+            void openAppBookmarkInGroup(bookmark, tab.group.id).catch(reportActionError);
+          });
           rows.push(sectionHeader);
         }
         list.appendChild(sectionHeader);
@@ -2230,6 +2316,15 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
       pointerDownRowIndex = null;
     });
     row.addEventListener("dragover", (event) => {
+      if (draggedAppBookmarkId !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        const rect = row.getBoundingClientRect();
+        updateAppBookmarkDropTarget(row, tab, event.clientY < rect.top + rect.height / 2 ? "before" : "after");
+        return;
+      }
+
       if (sortMode !== "window" || draggedTabId === null || draggedTabId === tab.id) {
         return;
       }
@@ -2239,7 +2334,31 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
       const rect = row.getBoundingClientRect();
       updateDropTarget(row, event.clientY < rect.top + rect.height / 2 ? "before" : "after");
     });
+    row.addEventListener("dragleave", (event) => {
+      if (event.relatedTarget instanceof Node && row.contains(event.relatedTarget)) {
+        return;
+      }
+
+      clearAppBookmarkDropTarget();
+    });
     row.addEventListener("drop", (event) => {
+      if (draggedAppBookmarkId !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        const bookmark = getAppBookmarkById(draggedAppBookmarkId);
+        const targetGroupId = appBookmarkDropTarget?.groupId ?? null;
+        const insertIndex = appBookmarkDropTarget?.insertIndex ?? null;
+        clearAppBookmarkDropTarget();
+        draggedAppBookmarkId = null;
+        if (!bookmark) {
+          setDesktopAppStatus("App bookmark not found", "error");
+          return;
+        }
+
+        void openAppBookmarkInGroup(bookmark, targetGroupId, null, insertIndex).catch(reportActionError);
+        return;
+      }
+
       if (sortMode !== "window") {
         return;
       }
