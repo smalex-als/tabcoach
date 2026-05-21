@@ -521,6 +521,32 @@ function getRowIndexForGroupId(groupId) {
   return rowIndex >= 0 ? rowIndex : 0;
 }
 
+function getGroupScrollAnchor(groupId) {
+  const groupRow = rows.find((row) => Number(row.dataset.tabcoachGroupId) === groupId && !row.dataset.tabcoachTabId);
+  if (!groupRow) {
+    return null;
+  }
+
+  return {
+    groupId,
+    top: groupRow.getBoundingClientRect().top
+  };
+}
+
+function restoreGroupScrollAnchor(anchor) {
+  if (!anchor) {
+    return;
+  }
+
+  const groupRow = rows.find((row) => Number(row.dataset.tabcoachGroupId) === anchor.groupId && !row.dataset.tabcoachTabId);
+  if (!groupRow) {
+    return;
+  }
+
+  const nextTop = groupRow.getBoundingClientRect().top;
+  list.scrollTop += nextTop - anchor.top;
+}
+
 function getRowIndexForTabOrGroup(tabId) {
   const tab = visibleTabs.find((item) => item.id === tabId);
   if (tab?.group?.collapsed) {
@@ -591,6 +617,7 @@ async function setGroupCollapsed(groupId, collapsed) {
   }
 
   const selectedTabId = getSelectedTabId();
+  const scrollAnchor = getGroupScrollAnchor(groupId);
   const response = await sendMessage({ type: SET_GROUP_COLLAPSED_MESSAGE, groupId, collapsed }).then((result) =>
     assertResponse(result, "Group update failed")
   );
@@ -606,7 +633,13 @@ async function setGroupCollapsed(groupId, collapsed) {
     selectedIndex = getRowIndexForTabId(selectedTabId || firstGroupTab?.id);
   }
 
-  applyRowState();
+  rows.forEach((row, index) => {
+    row.setAttribute("aria-selected", String(index === selectedIndex));
+  });
+  restoreGroupScrollAnchor(scrollAnchor);
+  requestAnimationFrame(() => {
+    restoreGroupScrollAnchor(scrollAnchor);
+  });
 }
 
 function focusGroup(groupId) {
