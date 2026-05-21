@@ -1001,6 +1001,11 @@ function getTabSwitcherPopupBounds(sourceWindow, settings) {
   };
 }
 
+function isInvalidWindowBoundsError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Invalid value for bounds");
+}
+
 async function openTabSwitcherPopup() {
   const focusedWindow = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
   const [activeTab] = typeof focusedWindow?.id === "number" ? await chrome.tabs.query({ active: true, windowId: focusedWindow.id }) : [];
@@ -1026,12 +1031,31 @@ async function openTabSwitcherPopup() {
     }
   }
 
-  const popupWindow = await chrome.windows.create({
+  const popupCreateOptions = {
     url: popupUrl,
     type: "popup",
     ...getTabSwitcherPopupBounds(focusedWindow, settings),
     focused: true
-  });
+  };
+  let popupWindow = null;
+
+  try {
+    popupWindow = await chrome.windows.create(popupCreateOptions);
+  } catch (error) {
+    if (!isInvalidWindowBoundsError(error)) {
+      throw error;
+    }
+
+    console.warn("Tabcoach popup bounds rejected; retrying with default placement", error);
+    popupWindow = await chrome.windows.create({
+      url: popupUrl,
+      type: "popup",
+      width: DEFAULT_SWITCHER_POPUP_WIDTH,
+      height: DEFAULT_SWITCHER_POPUP_HEIGHT,
+      focused: true
+    });
+  }
+
   tabSwitcherPopupWindowId = typeof popupWindow.id === "number" ? popupWindow.id : null;
 }
 
