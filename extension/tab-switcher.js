@@ -554,6 +554,40 @@ function restoreGroupScrollAnchor(anchor) {
   list.scrollTop += nextTop - anchor.top;
 }
 
+function getSelectedScrollAnchor() {
+  const row = rows[selectedIndex];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    tabId: row.dataset.tabcoachTabId || "",
+    groupId: row.dataset.tabcoachGroupId || "",
+    isGroupHeader: !row.dataset.tabcoachTabId,
+    top: row.getBoundingClientRect().top
+  };
+}
+
+function restoreSelectedScrollAnchor(anchor) {
+  if (!anchor) {
+    return;
+  }
+
+  const row = rows.find((candidate) => {
+    if (anchor.isGroupHeader) {
+      return !candidate.dataset.tabcoachTabId && candidate.dataset.tabcoachGroupId === anchor.groupId;
+    }
+
+    return candidate.dataset.tabcoachTabId === anchor.tabId;
+  });
+
+  if (!row) {
+    return;
+  }
+
+  list.scrollTop += row.getBoundingClientRect().top - anchor.top;
+}
+
 function getRowIndexForTabOrGroup(tabId) {
   const tab = visibleTabs.find((item) => item.id === tabId);
   if (tab?.group?.collapsed) {
@@ -2080,7 +2114,7 @@ async function toggleGroupBookmarkRows(group) {
   applyRowState();
 }
 
-function renderTabs({ scrollBlock = "nearest" } = {}) {
+function renderTabs({ scrollBlock = "nearest", updateRowState = true } = {}) {
   closeContextMenu();
   rows = [];
   tabRows = [];
@@ -2097,7 +2131,9 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     empty.className = "empty";
     empty.textContent = tabs.length === 0 ? "No tabs" : "No matching tabs";
     list.appendChild(empty);
-    applyRowState(scrollBlock);
+    if (updateRowState) {
+      applyRowState(scrollBlock);
+    }
     return;
   }
 
@@ -2543,16 +2579,19 @@ function renderTabs({ scrollBlock = "nearest" } = {}) {
     }
   });
 
-  applyRowState(scrollBlock);
+  if (updateRowState) {
+    applyRowState(scrollBlock);
+  }
 }
 
-async function loadTabs() {
+async function loadTabs({ preserveScroll = false } = {}) {
   if (!Number.isInteger(windowId)) {
     setError("Invalid window id");
     return;
   }
 
   try {
+    const scrollAnchor = preserveScroll ? getSelectedScrollAnchor() : null;
     const selectedTabId = document.body.classList.contains("window-blurred") ? null : getSelectedTabId();
     const response = await sendMessage({ type: GET_TAB_SWITCHER_ITEMS_MESSAGE }).then((result) =>
       assertResponse(result, "Could not load tabs")
@@ -2583,14 +2622,24 @@ async function loadTabs() {
       editingLabelDraft = "";
     }
 
-    renderTabs({ scrollBlock: "center" });
+    renderTabs({ scrollBlock: preserveScroll ? "nearest" : "center", updateRowState: !preserveScroll });
     selectedIndex =
       activeRenamingGroupId !== null
         ? getRowIndexForGroupId(activeRenamingGroupId)
         : activeEditingLabelTabId !== null
           ? getRowIndexForTabId(activeEditingLabelTabId)
         : getRowIndexForTabOrGroup(selectedTabId || visibleTabs.find((tab) => tab.active)?.id);
-    applyRowState("center");
+    if (preserveScroll) {
+      rows.forEach((row, index) => {
+        row.setAttribute("aria-selected", String(index === selectedIndex));
+      });
+      restoreSelectedScrollAnchor(scrollAnchor);
+      requestAnimationFrame(() => {
+        restoreSelectedScrollAnchor(scrollAnchor);
+      });
+    } else {
+      applyRowState("center");
+    }
     if (activeRenamingGroupId !== null) {
       focusGroupRenameInput(activeRenamingGroupId);
     } else if (activeEditingLabelTabId !== null) {
@@ -2603,14 +2652,14 @@ async function loadTabs() {
   }
 }
 
-function scheduleRefreshTabs() {
+function scheduleRefreshTabs({ preserveScroll = true } = {}) {
   if (refreshTimer !== null) {
     clearTimeout(refreshTimer);
   }
 
   refreshTimer = setTimeout(() => {
     refreshTimer = null;
-    void loadTabs();
+    void loadTabs({ preserveScroll });
   }, 120);
 }
 
