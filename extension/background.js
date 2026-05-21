@@ -4,7 +4,9 @@ const DEFAULT_SETTINGS = {
   fetchDiagnostics: true,
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
-  badgeMode: "both"
+  badgeMode: "both",
+  appBookmarks: [],
+  workspaceLaunchGroups: []
 };
 const SYNC_ENDPOINT = "/api/sync";
 const TAB_SWITCH_LOG_ENDPOINT = "/api/tab-switch";
@@ -38,6 +40,7 @@ const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
 const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
+const CLOSE_GROUP_MESSAGE = "tabcoach:close-group";
 const OPEN_GROUP_BOOKMARK_MESSAGE = "tabcoach:open-group-bookmark";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
@@ -45,6 +48,10 @@ const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
 const GET_TAB_SWITCH_STATS_MESSAGE = "tabcoach:get-tab-switch-stats";
 const GET_DESKTOP_APPS_MESSAGE = "tabcoach:get-desktop-apps";
 const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
+const GET_APP_BOOKMARKS_MESSAGE = "tabcoach:get-app-bookmarks";
+const OPEN_APP_BOOKMARK_MESSAGE = "tabcoach:open-app-bookmark";
+const GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE = "tabcoach:get-workspace-launch-groups";
+const LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE = "tabcoach:launch-workspace-launch-group";
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
 const ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX = "assign-numeric-bookmark-";
 const JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX = "jump-numeric-bookmark-";
@@ -88,6 +95,96 @@ const tabActivationHistoryByWindowId = new Map();
 const tabForwardHistoryByWindowId = new Map();
 const suppressedActivationHistoryByWindowId = new Map();
 
+function sanitizeWorkspaceUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || rawUrl.trim().length === 0) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return "";
+    }
+
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+function getAppBookmarkId(bookmark, index) {
+  if (typeof bookmark?.id === "string" && bookmark.id.trim().length > 0) {
+    return bookmark.id.trim();
+  }
+
+  if (typeof bookmark?.label === "string" && bookmark.label.trim().length > 0) {
+    const slug = bookmark.label
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (slug) {
+      return slug;
+    }
+  }
+
+  return `app-bookmark-${index + 1}`;
+}
+
+function sanitizeAppBookmarks(bookmarks) {
+  if (!Array.isArray(bookmarks)) {
+    return [];
+  }
+
+  return bookmarks
+    .map((bookmark, index) => ({
+      id: getAppBookmarkId(bookmark, index),
+      label: typeof bookmark?.label === "string" ? bookmark.label.trim() : "",
+      url: sanitizeWorkspaceUrl(bookmark?.url)
+    }))
+    .filter((bookmark) => bookmark.label && bookmark.url);
+}
+
+function getWorkspaceLaunchGroupId(group, index) {
+  if (typeof group?.id === "string" && group.id.trim().length > 0) {
+    return group.id.trim();
+  }
+
+  if (typeof group?.label === "string" && group.label.trim().length > 0) {
+    const slug = group.label
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (slug) {
+      return slug;
+    }
+  }
+
+  return `workspace-${index + 1}`;
+}
+
+function sanitizeWorkspaceLaunchGroups(groups) {
+  if (!Array.isArray(groups)) {
+    return [];
+  }
+
+  return groups
+    .map((group, index) => {
+      const label = typeof group?.label === "string" ? group.label.trim() : "";
+      const urls = Array.isArray(group?.urls)
+        ? [...new Set(group.urls.map(sanitizeWorkspaceUrl).filter(Boolean))]
+        : [];
+
+      return {
+        id: getWorkspaceLaunchGroupId(group, index),
+        label,
+        urls
+      };
+    })
+    .filter((group) => group.label && group.urls.length > 0);
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -105,7 +202,9 @@ function sanitizeSettings(settings) {
     fetchDiagnostics: Boolean(settings.fetchDiagnostics),
     syncIntervalMinutes: Number.isFinite(syncIntervalMinutes) && syncIntervalMinutes >= 1 ? syncIntervalMinutes : DEFAULT_SETTINGS.syncIntervalMinutes,
     switcherOpenLeft: Boolean(settings.switcherOpenLeft),
-    badgeMode: badgeModes.has(settings.badgeMode) ? settings.badgeMode : DEFAULT_SETTINGS.badgeMode
+    badgeMode: badgeModes.has(settings.badgeMode) ? settings.badgeMode : DEFAULT_SETTINGS.badgeMode,
+    appBookmarks: sanitizeAppBookmarks(settings.appBookmarks),
+    workspaceLaunchGroups: sanitizeWorkspaceLaunchGroups(settings.workspaceLaunchGroups)
   };
 }
 
@@ -1743,6 +1842,19 @@ async function renameGroupFromSwitcher(groupId, title, context = {}) {
   return collectTabSwitcherItems(windowId);
 }
 
+async function closeGroupFromSwitcher(groupId, context = {}) {
+  const { group, windowId } = await getValidatedGroupInSwitcherWindow(groupId, context);
+  const groupTabs = await chrome.tabs.query({ windowId, groupId: group.id });
+  const tabIds = groupTabs.map((tab) => tab.id).filter((tabId) => typeof tabId === "number");
+
+  if (tabIds.length === 0) {
+    return collectTabSwitcherItems(windowId);
+  }
+
+  await chrome.tabs.remove(tabIds);
+  return collectTabSwitcherItems(windowId);
+}
+
 async function getOrCreateBookmarkFolder() {
   const existingFolderId = await findBookmarkFolderId();
   if (existingFolderId) {
@@ -2048,6 +2160,211 @@ async function launchDesktopAppFromServer(appId) {
   return response.json();
 }
 
+async function getWorkspaceLaunchGroups() {
+  const settings = await getSettings();
+  return settings.workspaceLaunchGroups;
+}
+
+async function getAppBookmarks() {
+  const settings = await getSettings();
+  return settings.appBookmarks;
+}
+
+async function resolveAppBookmarkTargetGroupId(groupId, context = {}) {
+  if (typeof groupId === "number" && Number.isInteger(groupId) && groupId >= 0) {
+    return groupId;
+  }
+
+  const windowId = getSwitcherContextWindowId(context);
+  const activeTab = await getActiveTabInWindow(windowId);
+  if (typeof activeTab?.groupId === "number" && activeTab.groupId >= 0) {
+    return activeTab.groupId;
+  }
+
+  return null;
+}
+
+async function resolveAppBookmarkWindowId(context = {}) {
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId === "number") {
+    return windowId;
+  }
+
+  const focusedWindowId = await getFocusedWindowId();
+  if (typeof focusedWindowId === "number") {
+    return focusedWindowId;
+  }
+
+  throw new Error("Invalid window id");
+}
+
+async function openAppBookmarkInGroup(bookmarkId, groupId, context = {}) {
+  const bookmarks = await getAppBookmarks();
+  const bookmark = bookmarks.find((item) => item.id === bookmarkId);
+  if (!bookmark) {
+    throw new Error("Unknown app bookmark");
+  }
+
+  const targetGroupId = await resolveAppBookmarkTargetGroupId(groupId, context);
+  const target = targetGroupId === null
+    ? { group: null, windowId: await resolveAppBookmarkWindowId(context) }
+    : await getValidatedGroupInSwitcherWindow(targetGroupId, context);
+  const { group, windowId } = target;
+  const normalizedBookmarkUrl = normalizeUrl(bookmark.url);
+  const windowTabs = await chrome.tabs.query({ windowId });
+  const existingTab = windowTabs.find((tab) => typeof tab.url === "string" && normalizeUrl(tab.url) === normalizedBookmarkUrl);
+
+  if (typeof existingTab?.id === "number") {
+    await switchToTab(existingTab.id, context);
+    return {
+      bookmark,
+      openedExisting: true,
+      tab: normalizeTab(existingTab),
+      tabs: await collectTabSwitcherItems(windowId)
+    };
+  }
+
+  const activeTab = windowTabs.find((tab) => tab.active) ?? null;
+  const groupTabs = targetGroupId === null
+    ? []
+    : windowTabs
+        .filter((tab) => tab.groupId === targetGroupId)
+        .sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+  const insertIndex = targetGroupId === null
+    ? typeof activeTab?.index === "number" ? activeTab.index + 1 : windowTabs.length
+    : groupTabs.length > 0
+      ? Math.max(...groupTabs.map((tab) => (typeof tab.index === "number" ? tab.index : 0))) + 1
+      : typeof activeTab?.index === "number" ? activeTab.index + 1 : windowTabs.length;
+  const tab = await chrome.tabs.create({
+    windowId,
+    index: Math.min(windowTabs.length, insertIndex),
+    url: bookmark.url,
+    active: true
+  });
+  markTabCreated(tab.id);
+
+  if (group && typeof tab.id === "number") {
+    await chrome.tabs.group({ groupId: group.id, tabIds: [tab.id] });
+    await chrome.tabGroups.update(group.id, { collapsed: false });
+  }
+
+  if (typeof tab.windowId === "number") {
+    await chrome.windows.update(tab.windowId, { focused: true });
+  }
+
+  scheduleSync("app-bookmark-opened");
+  notifyTabSwitcherRefresh(windowId);
+
+  return {
+    bookmark,
+    openedExisting: false,
+    tab: normalizeTab(tab),
+    tabs: await collectTabSwitcherItems(windowId)
+  };
+}
+
+async function launchWorkspaceLaunchGroup(groupId, context = {}) {
+  const groups = await getWorkspaceLaunchGroups();
+  const group = groups.find((item) => item.id === groupId);
+  if (!group) {
+    throw new Error("Unknown workspace");
+  }
+
+  const windowId = getSwitcherContextWindowId(context);
+  const createdTabs = [];
+  const existingTabs = [];
+
+  if (group.urls.length > 0) {
+    if (typeof windowId !== "number") {
+      throw new Error("Invalid window id");
+    }
+
+    const targetWindow = await chrome.windows.get(windowId);
+    if (targetWindow.type !== "normal") {
+      throw new Error("Workspace tabs can only open in a normal browser window");
+    }
+
+    const windowTabs = await chrome.tabs.query({ windowId });
+    const tabGroups = await chrome.tabGroups.query({ windowId });
+    const normalizedWorkspaceTitle = normalizeBookmarkFolderTitle(group.label).toLowerCase();
+    const existingWorkspaceGroup = tabGroups.find(
+      (tabGroup) => normalizeBookmarkFolderTitle(tabGroup.title || "").toLowerCase() === normalizedWorkspaceTitle
+    ) ?? null;
+    const existingWorkspaceGroupTabs = existingWorkspaceGroup
+      ? windowTabs
+          .filter((tab) => tab.groupId === existingWorkspaceGroup.id)
+          .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
+      : [];
+    const existingTabsByNormalizedUrl = new Map(
+      windowTabs
+        .filter((tab) => typeof tab.url === "string" && tab.url.length > 0)
+        .map((tab) => [normalizeUrl(tab.url), tab])
+    );
+    const activeTab = windowTabs.find((tab) => tab.active) ?? null;
+    let insertIndex = existingWorkspaceGroupTabs.length > 0
+      ? Math.max(...existingWorkspaceGroupTabs.map((tab) => (typeof tab.index === "number" ? tab.index : 0))) + 1
+      : typeof activeTab?.index === "number" ? activeTab.index + 1 : windowTabs.length;
+    let firstTargetTab = null;
+
+    for (const url of group.urls) {
+      const existingTab = existingTabsByNormalizedUrl.get(normalizeUrl(url));
+      if (existingTab) {
+        firstTargetTab = firstTargetTab ?? existingTab;
+        existingTabs.push(existingTab);
+        continue;
+      }
+
+      const tab = await chrome.tabs.create({
+        windowId,
+        index: insertIndex,
+        url,
+        active: firstTargetTab === null
+      });
+      insertIndex += 1;
+      markTabCreated(tab.id);
+      firstTargetTab = firstTargetTab ?? tab;
+      createdTabs.push(tab);
+    }
+
+    const createdTabIds = createdTabs.map((tab) => tab.id).filter((tabId) => typeof tabId === "number");
+    if (createdTabIds.length > 0) {
+      const tabGroupId = existingWorkspaceGroup
+        ? await chrome.tabs.group({
+            groupId: existingWorkspaceGroup.id,
+            tabIds: createdTabIds
+          })
+        : await chrome.tabs.group({
+            tabIds: createdTabIds,
+            createProperties: { windowId }
+          });
+      await chrome.tabGroups.update(tabGroupId, {
+        title: group.label,
+        collapsed: false
+      });
+    }
+
+    const activeCreatedTab = createdTabs.find((tab) => tab.active);
+    if (!activeCreatedTab && typeof firstTargetTab?.id === "number") {
+      await switchToTab(firstTargetTab.id, context);
+    } else {
+      await chrome.windows.update(windowId, { focused: true });
+    }
+
+    scheduleSync("workspace-launch");
+    notifyTabSwitcherRefresh(windowId);
+  }
+
+  return {
+    workspace: {
+      id: group.id,
+      label: group.label
+    },
+    openedTabCount: createdTabs.length,
+    existingTabCount: existingTabs.length,
+    tabs: typeof windowId === "number" ? await collectTabSwitcherItems(windowId) : []
+  };
+}
+
 function scheduleSync(reason) {
   if (pendingSyncTimer !== null) {
     clearTimeout(pendingSyncTimer);
@@ -2276,6 +2593,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === GET_APP_BOOKMARKS_MESSAGE) {
+    void getAppBookmarks()
+      .then((bookmarks) => {
+        sendResponse({ ok: true, bookmarks });
+      })
+      .catch((error) => {
+        console.error("Tabcoach app bookmark list failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === OPEN_APP_BOOKMARK_MESSAGE) {
+    void openAppBookmarkInGroup(message.bookmarkId, message.groupId, switcherContext)
+      .then((result) => {
+        sendResponse({ ok: true, ...result });
+      })
+      .catch((error) => {
+        console.error("Tabcoach app bookmark open failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE) {
+    void getWorkspaceLaunchGroups()
+      .then((groups) => {
+        sendResponse({ ok: true, groups });
+      })
+      .catch((error) => {
+        console.error("Tabcoach workspace list failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE) {
+    void launchWorkspaceLaunchGroup(message.groupId, switcherContext)
+      .then((result) => {
+        sendResponse({ ok: true, ...result });
+      })
+      .catch((error) => {
+        console.error("Tabcoach workspace launch failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
   if (message?.type === COPY_TAB_URL_MESSAGE) {
     void copyTabUrlFromSwitcher(message.tabId, message.url, switcherContext)
       .then(() => {
@@ -2361,6 +2730,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach group rename failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === CLOSE_GROUP_MESSAGE) {
+    void closeGroupFromSwitcher(message.groupId, switcherContext)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach group close failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

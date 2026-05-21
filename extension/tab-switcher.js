@@ -12,12 +12,17 @@ const CREATE_GROUP_MESSAGE = "tabcoach:create-group";
 const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
+const CLOSE_GROUP_MESSAGE = "tabcoach:close-group";
 const OPEN_GROUP_BOOKMARK_MESSAGE = "tabcoach:open-group-bookmark";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
 const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
 const GET_DESKTOP_APPS_MESSAGE = "tabcoach:get-desktop-apps";
 const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
+const GET_APP_BOOKMARKS_MESSAGE = "tabcoach:get-app-bookmarks";
+const OPEN_APP_BOOKMARK_MESSAGE = "tabcoach:open-app-bookmark";
+const GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE = "tabcoach:get-workspace-launch-groups";
+const LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE = "tabcoach:launch-workspace-launch-group";
 const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCHER_OPEN_LEFT_KEY = "switcherOpenLeft";
 const FOCUSED_GROUPS_KEY = "focusedGroupIdsByWindow";
@@ -60,6 +65,7 @@ const searchInput = document.getElementById("searchInput");
 const newTabButton = document.getElementById("newTabButton");
 const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
+const shell = document.querySelector(".shell");
 
 document.body.classList.toggle("window-blurred", !document.hasFocus());
 
@@ -71,6 +77,10 @@ let tabLabelsByUrl = {};
 let visibleTabs = [];
 let rows = [];
 let tabRows = [];
+let appBookmarks = [];
+let desktopAppItems = FALLBACK_DESKTOP_APPS;
+let workspaceLaunchGroups = [];
+let launchersExpanded = false;
 let sortMode = "window";
 let searchQuery = "";
 let selectedIndex = 0;
@@ -687,6 +697,22 @@ async function renameGroup(groupId, nextTitle) {
   applyRowState();
 }
 
+async function closeGroup(groupId) {
+  if (typeof groupId !== "number") {
+    return;
+  }
+
+  const response = await sendMessage({ type: CLOSE_GROUP_MESSAGE, groupId }).then((result) =>
+    assertResponse(result, "Group close failed")
+  );
+  setTabs(response.tabs);
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = Math.min(selectedIndex, Math.max(rows.length - 1, 0));
+  applyRowState();
+}
+
 async function openGroupBookmark(groupId, bookmarkId, insertOffset = 0) {
   const response = await sendMessage({ type: OPEN_GROUP_BOOKMARK_MESSAGE, groupId, bookmarkId, insertOffset }).then((result) =>
     assertResponse(result, "Open bookmark failed")
@@ -1113,6 +1139,54 @@ function getSafeDesktopApps(apps) {
     : [];
 }
 
+function getSafeWorkspaceLaunchGroups(groups) {
+  return Array.isArray(groups)
+    ? groups
+        .filter(
+          (group) =>
+            typeof group?.id === "string" &&
+            group.id.length > 0 &&
+            typeof group?.label === "string" &&
+            group.label.length > 0 &&
+            Array.isArray(group.urls) &&
+            group.urls.length > 0
+        )
+        .map((group) => ({
+          id: group.id,
+          label: group.label,
+          urlCount: Array.isArray(group.urls) ? group.urls.length : 0
+        }))
+    : [];
+}
+
+function getSafeAppBookmarks(bookmarks) {
+  return Array.isArray(bookmarks)
+    ? bookmarks
+        .filter(
+          (bookmark) =>
+            typeof bookmark?.id === "string" &&
+            bookmark.id.length > 0 &&
+            typeof bookmark?.label === "string" &&
+            bookmark.label.length > 0 &&
+            typeof bookmark?.url === "string" &&
+            bookmark.url.length > 0
+        )
+        .map((bookmark) => ({ id: bookmark.id, label: bookmark.label, url: bookmark.url }))
+    : [];
+}
+
+function getHostnameForIcon(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function getFaviconUrl(rawUrl) {
+  return `https://www.google.com/s2/favicons?domain_url=${encodeURIComponent(rawUrl)}&sz=64`;
+}
+
 async function launchDesktopApp(app, button) {
   const originalText = button.textContent;
   button.disabled = true;
@@ -1136,33 +1210,248 @@ async function launchDesktopApp(app, button) {
   }
 }
 
-function renderDesktopApps(apps) {
-  desktopApps.replaceChildren();
-  const safeApps = getSafeDesktopApps(apps);
+async function launchWorkspaceLaunchGroup(group, button) {
+  const originalText = button.textContent;
+  const usesRichButton = button.classList.contains("app-launcher-item");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  if (!usesRichButton) {
+    button.textContent = "...";
+  }
+  setDesktopAppStatus("");
 
-  if (safeApps.length === 0) {
+  try {
+    const response = await sendMessage({ type: LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE, groupId: group.id }).then((result) =>
+      assertResponse(result, `Could not open ${group.label}`)
+    );
+    if (Array.isArray(response.tabs)) {
+      setTabs(response.tabs);
+      refreshDuplicateCounts();
+      refreshVisibleTabs();
+      renderTabs();
+      selectedIndex = 0;
+      applyRowState();
+    }
+
+    if (!usesRichButton) {
+      button.textContent = "✓";
+    }
+    setTimeout(() => {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      if (!usesRichButton) {
+        button.textContent = originalText;
+      }
+    }, 700);
+
+    if ((Number(response.openedTabCount) || Number(response.existingTabCount) || 0) > 0) {
+      closeAfterSwitchIfNeeded();
+    }
+  } catch (error) {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    if (!usesRichButton) {
+      button.textContent = originalText;
+    }
+    console.error("Tabcoach workspace launch failed", error);
+    setDesktopAppStatus(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function openAppBookmark(bookmark, button) {
+  const groupId = getSelectedGroupId();
+  const originalText = button.textContent;
+  const usesRichButton = button.classList.contains("app-launcher-item");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  if (!usesRichButton) {
+    button.textContent = "...";
+  }
+  setDesktopAppStatus("");
+
+  try {
+    const response = await sendMessage({ type: OPEN_APP_BOOKMARK_MESSAGE, bookmarkId: bookmark.id, groupId }).then((result) =>
+      assertResponse(result, `Could not open ${bookmark.label}`)
+    );
+    if (Array.isArray(response.tabs)) {
+      setTabs(response.tabs);
+      refreshDuplicateCounts();
+      refreshVisibleTabs();
+      renderTabs();
+      selectedIndex = getRowIndexForTabId(response.tab?.id) || getRowIndexForGroupId(groupId);
+      applyRowState();
+    }
+
+    if (!usesRichButton) {
+      button.textContent = "✓";
+    }
+    setTimeout(() => {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      if (!usesRichButton) {
+        button.textContent = originalText;
+      }
+    }, 700);
+    closeAfterSwitchIfNeeded();
+  } catch (error) {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    if (!usesRichButton) {
+      button.textContent = originalText;
+    }
+    console.error("Tabcoach app bookmark open failed", error);
+    setDesktopAppStatus(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+function renderLaunchers() {
+  desktopApps.replaceChildren();
+  document.querySelector(".app-launcher-panel")?.remove();
+  const safeAppBookmarks = getSafeAppBookmarks(appBookmarks);
+  const safeWorkspaces = getSafeWorkspaceLaunchGroups(workspaceLaunchGroups);
+  const safeApps = getSafeDesktopApps(desktopAppItems);
+
+  if (safeAppBookmarks.length === 0 && safeWorkspaces.length === 0 && safeApps.length === 0) {
     desktopApps.hidden = true;
     return;
   }
 
   desktopApps.hidden = false;
-  const appButtons = document.createElement("div");
-  appButtons.className = "desktop-app-buttons";
+  const hasRareLaunchers = safeAppBookmarks.length > 0 || safeWorkspaces.length > 0;
 
-  safeApps.forEach((app) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "desktop-app-button";
-    button.textContent = app.label;
-    button.title = `Open ${app.label}`;
-    button.setAttribute("aria-label", `Open ${app.label}`);
-    button.addEventListener("click", () => {
-      void launchDesktopApp(app, button);
+  if (hasRareLaunchers) {
+    const toggleButton = document.createElement("button");
+    toggleButton.type = "button";
+    toggleButton.className = "launcher-toggle";
+    toggleButton.textContent = "Apps";
+    toggleButton.title = launchersExpanded ? "Hide app launcher" : "Show app launcher";
+    toggleButton.setAttribute("aria-label", toggleButton.title);
+    toggleButton.setAttribute("aria-expanded", String(launchersExpanded));
+    toggleButton.addEventListener("click", () => {
+      launchersExpanded = !launchersExpanded;
+      renderLaunchers();
     });
-    appButtons.appendChild(button);
-  });
+    desktopApps.appendChild(toggleButton);
+  }
 
-  desktopApps.appendChild(appButtons);
+  if (hasRareLaunchers && launchersExpanded) {
+    const panel = document.createElement("section");
+    panel.className = "app-launcher-panel";
+    panel.setAttribute("aria-label", "App launcher");
+
+    const panelHeader = document.createElement("div");
+    panelHeader.className = "app-launcher-header";
+    const title = document.createElement("div");
+    title.className = "app-launcher-title";
+    title.textContent = "Apps";
+    panelHeader.appendChild(title);
+    panel.appendChild(panelHeader);
+
+    if (safeAppBookmarks.length > 0) {
+      const bookmarkGrid = document.createElement("div");
+      bookmarkGrid.className = "app-launcher-grid";
+
+      safeAppBookmarks.forEach((bookmark) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "app-launcher-item";
+        button.title = `Open ${bookmark.label} in selected group`;
+        button.setAttribute("aria-label", `Open ${bookmark.label} in selected group`);
+        const icon = document.createElement("span");
+        icon.className = "app-launcher-icon";
+        const favicon = document.createElement("img");
+        favicon.alt = "";
+        favicon.src = getFaviconUrl(bookmark.url);
+        favicon.addEventListener("error", () => {
+          favicon.remove();
+          icon.textContent = bookmark.label.slice(0, 1).toUpperCase();
+        });
+        icon.appendChild(favicon);
+        const label = document.createElement("span");
+        label.className = "app-launcher-label";
+        label.textContent = bookmark.label;
+        const meta = document.createElement("span");
+        meta.className = "app-launcher-meta";
+        meta.textContent = getHostnameForIcon(bookmark.url);
+        button.append(icon, label, meta);
+        button.addEventListener("click", () => {
+          void openAppBookmark(bookmark, button);
+        });
+        bookmarkGrid.appendChild(button);
+      });
+
+      panel.appendChild(bookmarkGrid);
+    }
+
+    if (safeWorkspaces.length > 0) {
+      const workspaceTitle = document.createElement("div");
+      workspaceTitle.className = "app-launcher-section-title";
+      workspaceTitle.textContent = "Workspaces";
+      const workspaceGrid = document.createElement("div");
+      workspaceGrid.className = "app-launcher-grid";
+
+      safeWorkspaces.forEach((group) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "app-launcher-item app-launcher-workspace";
+        button.title = `Open ${group.label}`;
+        button.setAttribute("aria-label", `Open ${group.label}`);
+        const icon = document.createElement("span");
+        icon.className = "app-launcher-icon";
+        icon.textContent = group.label.slice(0, 1).toUpperCase();
+        const label = document.createElement("span");
+        label.className = "app-launcher-label";
+        label.textContent = group.label;
+        const meta = document.createElement("span");
+        meta.className = "app-launcher-meta";
+        meta.textContent = `${group.urlCount} URL${group.urlCount === 1 ? "" : "s"}`;
+        button.append(icon, label, meta);
+        button.addEventListener("click", () => {
+          void launchWorkspaceLaunchGroup(group, button);
+        });
+        workspaceGrid.appendChild(button);
+      });
+
+      panel.append(workspaceTitle, workspaceGrid);
+    }
+
+    shell?.insertBefore(panel, desktopApps);
+  }
+
+  if (safeApps.length > 0) {
+    const appButtons = document.createElement("div");
+    appButtons.className = "desktop-app-buttons";
+
+    safeApps.forEach((app) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "desktop-app-button";
+      button.textContent = app.label;
+      button.title = `Open ${app.label}`;
+      button.setAttribute("aria-label", `Open ${app.label}`);
+      button.addEventListener("click", () => {
+        void launchDesktopApp(app, button);
+      });
+      appButtons.appendChild(button);
+    });
+
+    desktopApps.appendChild(appButtons);
+  }
+}
+
+function renderDesktopApps(apps) {
+  desktopAppItems = apps;
+  renderLaunchers();
+}
+
+function renderWorkspaceLaunchGroups(groups) {
+  workspaceLaunchGroups = groups;
+  renderLaunchers();
+}
+
+function renderAppBookmarks(bookmarks) {
+  appBookmarks = bookmarks;
+  renderLaunchers();
 }
 
 async function loadDesktopApps() {
@@ -1175,6 +1464,34 @@ async function loadDesktopApps() {
     renderDesktopApps(response.apps);
   } catch (error) {
     console.warn("Tabcoach desktop app list failed", error);
+    setDesktopAppStatus(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function loadWorkspaceLaunchGroups() {
+  renderWorkspaceLaunchGroups([]);
+
+  try {
+    const response = await sendMessage({ type: GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE }).then((result) =>
+      assertResponse(result, "Could not load workspaces")
+    );
+    renderWorkspaceLaunchGroups(response.groups);
+  } catch (error) {
+    console.warn("Tabcoach workspace list failed", error);
+    setDesktopAppStatus(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function loadAppBookmarks() {
+  renderAppBookmarks([]);
+
+  try {
+    const response = await sendMessage({ type: GET_APP_BOOKMARKS_MESSAGE }).then((result) =>
+      assertResponse(result, "Could not load app bookmarks")
+    );
+    renderAppBookmarks(response.bookmarks);
+  } catch (error) {
+    console.warn("Tabcoach app bookmark list failed", error);
     setDesktopAppStatus(error instanceof Error ? error.message : String(error), "error");
   }
 }
@@ -1541,7 +1858,9 @@ function openGroupContextMenu(group, rowIndex, clientX, clientY) {
     createContextMenuItem("Leave focus mode", leaveFocusGroupMode, { disabled: focusedGroupId === null }),
     createContextMenuSeparator(),
     createContextMenuItem(group.collapsed ? "Expand group" : "Collapse group", () => setGroupCollapsed(group.id, !group.collapsed)),
-    createContextMenuItem("Rename group", () => startRenameGroup(group.id))
+    createContextMenuItem("Rename group", () => startRenameGroup(group.id)),
+    createContextMenuSeparator(),
+    createContextMenuItem("Close group", () => closeGroup(group.id), { tone: "danger" })
   ];
   menu.append(...menuItems);
 
@@ -2366,4 +2685,6 @@ document.addEventListener("keydown", (event) => {
 }, { capture: true });
 
 void loadDesktopApps();
+void loadAppBookmarks();
+void loadWorkspaceLaunchGroups();
 void loadTabs();

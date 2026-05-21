@@ -79,7 +79,9 @@ The extension will:
 - show saved bookmarks for a tab group directly in the list when they are not currently open, then open a selected bookmark back into that group
 - assign numeric tab bookmark 1 from any page with `Ctrl+Shift+1` (`Control+Shift+1` on macOS), then jump with `Ctrl+1`; slots 0 through 9 are available as extension commands and can be assigned in `chrome://extensions/shortcuts`; saved numeric bookmarks show a small in-page notification; the `Command+E` popup supports slots 0 through 9
 - store bookmarks under `Tabcoach/<tab group name>` to keep saved tabs organized
+- show optional app bookmark buttons that open a configured URL in the currently selected tab group
 - show desktop app launcher buttons at the bottom of the `Command+E` popup; by default, the `iTerm` and `IntelliJ IDEA` buttons ask the local server to run `open -a` for those apps
+- show optional workspace launch buttons that open configured URLs as a new Chrome tab group
 - keep a per-window activation history and expose previous/next history commands for jumping backward and forward between recently active tabs in the same window
 - show a tab movement statistics page from extension options, backed by the local tab switch log
 
@@ -89,6 +91,18 @@ Use the `Stats` button in extension options to open tab movement statistics.
 
 The `Command+E` popup includes a `+` button that opens a new tab before the currently active tab in the source window. If the active tab is in a Chrome tab group, the new tab is added to the same group.
 The `Previous tab` shortcut defaults to `Ctrl+Q` (`Control+Q` on macOS) and can be changed from `chrome://extensions/shortcuts`. The `Next tab in history` command is available there too; Chrome may not allow `Ctrl+W` because it normally closes the current tab.
+
+App bookmarks can be configured from extension options as JSON:
+
+```json
+[
+  { "id": "gmail", "label": "Gmail", "url": "https://mail.google.com/" },
+  { "id": "calendar", "label": "Calendar", "url": "https://calendar.google.com/" },
+  { "id": "youtube", "label": "YouTube", "url": "https://www.youtube.com/" }
+]
+```
+
+Select a tab group or a tab inside a group in the `Command+E` popup, then click an app bookmark to open it inside that group. If the URL is already open in the current window, Tabcoach focuses that tab instead of opening a duplicate.
 
 Auto-close rules:
 
@@ -119,3 +133,17 @@ To add more macOS apps, start the server with `DESKTOP_APPS_JSON`:
 ```bash
 DESKTOP_APPS_JSON='[{"id":"iterm","label":"iTerm","macAppName":"iTerm"},{"id":"intellij-idea","label":"IntelliJ IDEA","macAppName":"IntelliJ IDEA"},{"id":"notes","label":"Notes","macAppName":"Notes"}]' npm run dev
 ```
+
+Workspace launch groups can be configured from extension options as JSON:
+
+```json
+[
+  {
+    "id": "job-search",
+    "label": "Job Search",
+    "urls": ["https://www.indeed.com/", "https://www.linkedin.com/jobs/"]
+  }
+]
+```
+
+Workspace `urls` are opened in the switcher's source Chrome window as a tab group. URLs that are already open in that window are focused instead of duplicated.
