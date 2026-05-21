@@ -5,7 +5,6 @@ const DEFAULT_SETTINGS = {
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
   badgeMode: "both",
-  appBookmarks: [],
   workspaceLaunchGroups: []
 };
 const SYNC_ENDPOINT = "/api/sync";
@@ -49,10 +48,12 @@ const GET_TAB_SWITCH_STATS_MESSAGE = "tabcoach:get-tab-switch-stats";
 const GET_DESKTOP_APPS_MESSAGE = "tabcoach:get-desktop-apps";
 const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
 const GET_APP_BOOKMARKS_MESSAGE = "tabcoach:get-app-bookmarks";
+const ADD_APP_BOOKMARK_MESSAGE = "tabcoach:add-app-bookmark";
 const OPEN_APP_BOOKMARK_MESSAGE = "tabcoach:open-app-bookmark";
 const GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE = "tabcoach:get-workspace-launch-groups";
 const LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE = "tabcoach:launch-workspace-launch-group";
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
+const APP_BOOKMARK_FOLDER_TITLE = "App Bookmarks";
 const ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX = "assign-numeric-bookmark-";
 const JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX = "jump-numeric-bookmark-";
 const PREVIOUS_TAB_COMMAND = "previous-tab";
@@ -110,39 +111,6 @@ function sanitizeWorkspaceUrl(rawUrl) {
   } catch {
     return "";
   }
-}
-
-function getAppBookmarkId(bookmark, index) {
-  if (typeof bookmark?.id === "string" && bookmark.id.trim().length > 0) {
-    return bookmark.id.trim();
-  }
-
-  if (typeof bookmark?.label === "string" && bookmark.label.trim().length > 0) {
-    const slug = bookmark.label
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
-    if (slug) {
-      return slug;
-    }
-  }
-
-  return `app-bookmark-${index + 1}`;
-}
-
-function sanitizeAppBookmarks(bookmarks) {
-  if (!Array.isArray(bookmarks)) {
-    return [];
-  }
-
-  return bookmarks
-    .map((bookmark, index) => ({
-      id: getAppBookmarkId(bookmark, index),
-      label: typeof bookmark?.label === "string" ? bookmark.label.trim() : "",
-      url: sanitizeWorkspaceUrl(bookmark?.url)
-    }))
-    .filter((bookmark) => bookmark.label && bookmark.url);
 }
 
 function getWorkspaceLaunchGroupId(group, index) {
@@ -203,7 +171,6 @@ function sanitizeSettings(settings) {
     syncIntervalMinutes: Number.isFinite(syncIntervalMinutes) && syncIntervalMinutes >= 1 ? syncIntervalMinutes : DEFAULT_SETTINGS.syncIntervalMinutes,
     switcherOpenLeft: Boolean(settings.switcherOpenLeft),
     badgeMode: badgeModes.has(settings.badgeMode) ? settings.badgeMode : DEFAULT_SETTINGS.badgeMode,
-    appBookmarks: sanitizeAppBookmarks(settings.appBookmarks),
     workspaceLaunchGroups: sanitizeWorkspaceLaunchGroups(settings.workspaceLaunchGroups)
   };
 }
@@ -1894,6 +1861,20 @@ async function findBookmarkSubfolderId(parentId, title) {
   return existingFolder?.id ?? null;
 }
 
+async function getOrCreateAppBookmarkFolder() {
+  const rootFolderId = await getOrCreateBookmarkFolder();
+  return getOrCreateBookmarkSubfolder(rootFolderId, APP_BOOKMARK_FOLDER_TITLE);
+}
+
+async function findAppBookmarkFolderId() {
+  const rootFolderId = await findBookmarkFolderId();
+  if (!rootFolderId) {
+    return null;
+  }
+
+  return findBookmarkSubfolderId(rootFolderId, APP_BOOKMARK_FOLDER_TITLE);
+}
+
 function normalizeBookmarkFolderTitle(title) {
   const normalized = typeof title === "string" ? title.trim().replace(/\s+/g, " ") : "";
   return normalized || "Ungrouped";
@@ -2165,9 +2146,80 @@ async function getWorkspaceLaunchGroups() {
   return settings.workspaceLaunchGroups;
 }
 
+async function getAppBookmarkFolderItems() {
+  const folderId = await findAppBookmarkFolderId();
+  if (!folderId) {
+    return [];
+  }
+
+  const bookmarks = await chrome.bookmarks.getChildren(folderId);
+  return bookmarks
+    .filter((bookmark) => typeof bookmark.url === "string" && bookmark.url.length > 0)
+    .map((bookmark) => ({
+      id: bookmark.id,
+      label: bookmark.title || bookmark.url,
+      url: bookmark.url,
+      source: "bookmarks"
+    }));
+}
+
 async function getAppBookmarks() {
-  const settings = await getSettings();
-  return settings.appBookmarks;
+  return getAppBookmarkFolderItems();
+}
+
+async function addAppBookmarkFromSwitcher(tabId, title, url, context = {}) {
+  if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
+    throw new Error("Invalid tab id");
+  }
+
+  if (typeof url !== "string" || url.length === 0) {
+    throw new Error("Invalid app bookmark URL");
+  }
+
+  const targetTab = await chrome.tabs.get(tabId);
+  assertTabInSwitcherWindow(targetTab, context, "add app bookmark");
+
+  const normalizedUrl = normalizeUrl(url);
+  const parentId = await getOrCreateAppBookmarkFolder();
+  const existingBookmarks = await chrome.bookmarks.getChildren(parentId);
+  const existingBookmark = existingBookmarks.find(
+    (bookmark) => typeof bookmark.url === "string" && normalizeUrl(bookmark.url) === normalizedUrl
+  );
+  const bookmarkTitle = typeof title === "string" && title.trim() ? title.trim() : targetTab.title || url;
+
+  if (existingBookmark?.id) {
+    if (existingBookmark.title !== bookmarkTitle) {
+      await chrome.bookmarks.update(existingBookmark.id, { title: bookmarkTitle });
+    }
+
+    return {
+      added: false,
+      bookmark: {
+        id: existingBookmark.id,
+        label: bookmarkTitle,
+        url: existingBookmark.url || url,
+        source: "bookmarks"
+      },
+      bookmarks: await getAppBookmarks()
+    };
+  }
+
+  const bookmark = await chrome.bookmarks.create({
+    parentId,
+    title: bookmarkTitle,
+    url
+  });
+
+  return {
+    added: true,
+    bookmark: {
+      id: bookmark.id,
+      label: bookmark.title || bookmarkTitle,
+      url: bookmark.url || url,
+      source: "bookmarks"
+    },
+    bookmarks: await getAppBookmarks()
+  };
 }
 
 async function resolveAppBookmarkTargetGroupId(groupId, context = {}) {
@@ -2600,6 +2652,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach app bookmark list failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === ADD_APP_BOOKMARK_MESSAGE) {
+    void addAppBookmarkFromSwitcher(message.tabId, message.title, message.url, switcherContext)
+      .then((result) => {
+        sendResponse({ ok: true, ...result });
+      })
+      .catch((error) => {
+        console.error("Tabcoach app bookmark add failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

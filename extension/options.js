@@ -5,7 +5,6 @@ const DEFAULT_SETTINGS = {
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
   badgeMode: "both",
-  appBookmarks: [],
   workspaceLaunchGroups: []
 };
 
@@ -20,7 +19,6 @@ const fields = {
   syncIntervalMinutes: document.getElementById("syncIntervalMinutes"),
   switcherOpenLeft: document.getElementById("switcherOpenLeft"),
   badgeMode: document.getElementById("badgeMode"),
-  appBookmarks: document.getElementById("appBookmarks"),
   workspaceLaunchGroups: document.getElementById("workspaceLaunchGroups")
 };
 
@@ -80,35 +78,6 @@ function getWorkspaceLaunchGroupId(group, index) {
   return `workspace-${index + 1}`;
 }
 
-function getAppBookmarkId(bookmark, index) {
-  if (typeof bookmark?.id === "string" && bookmark.id.trim().length > 0) {
-    return bookmark.id.trim();
-  }
-
-  if (typeof bookmark?.label === "string" && bookmark.label.trim().length > 0) {
-    const slug = bookmark.label
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
-    if (slug) {
-      return slug;
-    }
-  }
-
-  return `app-bookmark-${index + 1}`;
-}
-
-function sanitizeAppBookmarks(bookmarks) {
-  return bookmarks
-    .map((bookmark, index) => ({
-      id: getAppBookmarkId(bookmark, index),
-      label: typeof bookmark?.label === "string" ? bookmark.label.trim() : "",
-      url: sanitizeWorkspaceUrl(bookmark?.url)
-    }))
-    .filter((bookmark) => bookmark.label && bookmark.url);
-}
-
 function sanitizeWorkspaceLaunchGroups(groups) {
   return groups
     .map((group, index) => {
@@ -151,32 +120,7 @@ function readWorkspaceLaunchGroups() {
   return { groups, error: "" };
 }
 
-function readAppBookmarks() {
-  const rawValue = fields.appBookmarks.value.trim();
-  if (!rawValue) {
-    return { bookmarks: [], error: "" };
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(rawValue);
-  } catch {
-    return { bookmarks: [], error: "App bookmarks JSON is invalid" };
-  }
-
-  if (!Array.isArray(parsed)) {
-    return { bookmarks: [], error: "App bookmarks JSON must be an array" };
-  }
-
-  const bookmarks = sanitizeAppBookmarks(parsed);
-  if (bookmarks.length === 0 && parsed.length > 0) {
-    return { bookmarks: [], error: "Each app bookmark needs a label and URL" };
-  }
-
-  return { bookmarks, error: "" };
-}
-
-function readFormSettings(appBookmarks, workspaceLaunchGroups) {
+function readFormSettings(workspaceLaunchGroups) {
   return {
     serverBaseUrl: sanitizeServerBaseUrl(fields.serverBaseUrl.value),
     autoCloseDuplicates: fields.autoCloseDuplicates.checked,
@@ -184,7 +128,6 @@ function readFormSettings(appBookmarks, workspaceLaunchGroups) {
     syncIntervalMinutes: Number(fields.syncIntervalMinutes.value),
     switcherOpenLeft: fields.switcherOpenLeft.checked,
     badgeMode: fields.badgeMode.value,
-    appBookmarks,
     workspaceLaunchGroups
   };
 }
@@ -196,7 +139,6 @@ function writeFormSettings(settings) {
   fields.syncIntervalMinutes.value = String(settings.syncIntervalMinutes);
   fields.switcherOpenLeft.checked = Boolean(settings.switcherOpenLeft);
   fields.badgeMode.value = settings.badgeMode;
-  fields.appBookmarks.value = JSON.stringify(settings.appBookmarks || [], null, 2);
   fields.workspaceLaunchGroups.value = JSON.stringify(settings.workspaceLaunchGroups || [], null, 2);
 }
 
@@ -207,13 +149,6 @@ async function loadSettings() {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  const appBookmarkResult = readAppBookmarks();
-  if (appBookmarkResult.error) {
-    fields.appBookmarks.focus();
-    showStatus(appBookmarkResult.error, "error");
-    return;
-  }
-
   const workspaceResult = readWorkspaceLaunchGroups();
   if (workspaceResult.error) {
     fields.workspaceLaunchGroups.focus();
@@ -221,7 +156,7 @@ form.addEventListener("submit", (event) => {
     return;
   }
 
-  const settings = readFormSettings(appBookmarkResult.bookmarks, workspaceResult.groups);
+  const settings = readFormSettings(workspaceResult.groups);
 
   if (!settings.serverBaseUrl) {
     fields.serverBaseUrl.focus();

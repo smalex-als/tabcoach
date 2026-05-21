@@ -92,17 +92,9 @@ Use the `Stats` button in extension options to open tab movement statistics.
 The `Command+E` popup includes a `+` button that opens a new tab before the currently active tab in the source window. If the active tab is in a Chrome tab group, the new tab is added to the same group.
 The `Previous tab` shortcut defaults to `Ctrl+Q` (`Control+Q` on macOS) and can be changed from `chrome://extensions/shortcuts`. The `Next tab in history` command is available there too; Chrome may not allow `Ctrl+W` because it normally closes the current tab.
 
-App bookmarks can be configured from extension options as JSON:
+App bookmarks are stored in the Chrome bookmarks folder `Tabcoach/App Bookmarks`. Use a tab row context menu item, `Add to app bookmarks`, to save the current tab as an app bookmark.
 
-```json
-[
-  { "id": "gmail", "label": "Gmail", "url": "https://mail.google.com/" },
-  { "id": "calendar", "label": "Calendar", "url": "https://calendar.google.com/" },
-  { "id": "youtube", "label": "YouTube", "url": "https://www.youtube.com/" }
-]
-```
-
-Select a tab group or a tab inside a group in the `Command+E` popup, then click an app bookmark to open it inside that group. If the URL is already open in the current window, Tabcoach focuses that tab instead of opening a duplicate.
+Select a tab group or a tab inside a group in the `Command+E` popup, then click an app bookmark to open it inside that group. If no group is selected, the app bookmark opens ungrouped near the active tab. If the URL is already open in the current window, Tabcoach focuses that tab instead of opening a duplicate.
 
 Auto-close rules:
 

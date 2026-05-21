@@ -20,6 +20,7 @@ const LOG_TAB_EVENT_MESSAGE = "tabcoach:log-tab-event";
 const GET_DESKTOP_APPS_MESSAGE = "tabcoach:get-desktop-apps";
 const LAUNCH_DESKTOP_APP_MESSAGE = "tabcoach:launch-desktop-app";
 const GET_APP_BOOKMARKS_MESSAGE = "tabcoach:get-app-bookmarks";
+const ADD_APP_BOOKMARK_MESSAGE = "tabcoach:add-app-bookmark";
 const OPEN_APP_BOOKMARK_MESSAGE = "tabcoach:open-app-bookmark";
 const GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE = "tabcoach:get-workspace-launch-groups";
 const LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE = "tabcoach:launch-workspace-launch-group";
@@ -1010,6 +1011,28 @@ async function toggleBookmark(tabId) {
   list.scrollTop = previousScrollTop;
 }
 
+async function addAppBookmark(tabId) {
+  const tab = getTabById(tabId);
+  if (!tab?.url) {
+    return;
+  }
+
+  const response = await sendMessage({
+    type: ADD_APP_BOOKMARK_MESSAGE,
+    tabId,
+    title: tab.displayTitle || tab.title || tab.url || "Untitled tab",
+    url: tab.url
+  }).then((result) => assertResponse(result, "App bookmark add failed"));
+
+  if (Array.isArray(response.bookmarks)) {
+    renderAppBookmarks(response.bookmarks);
+  } else {
+    await loadAppBookmarks();
+  }
+
+  showShortcutNotification(response.added ? "Added app bookmark" : "App bookmark updated");
+}
+
 function startEditTabLabel(tabId) {
   const tab = getTabById(tabId);
   if (!tab) {
@@ -1795,6 +1818,9 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
       showShortcutNotification(copied ? "Copied URL" : "Copy failed");
     }),
     createContextMenuItem(tab.bookmarked ? "Remove bookmark" : "Bookmark tab", () => toggleBookmark(tab.id)),
+    createContextMenuItem("Add to app bookmarks", () => addAppBookmark(tab.id), {
+      disabled: !tab.url || tab.url.startsWith("chrome://")
+    }),
     createContextMenuSeparator(),
     createContextMenuItem("Create new group", () => createGroupForTab(tab.id), {
       disabled: !canGroupTab
