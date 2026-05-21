@@ -107,6 +107,13 @@ function sendMessage(message) {
   return chrome.runtime.sendMessage({ windowId, ...message });
 }
 
+function focusSearchInput({ select = false } = {}) {
+  searchInput.focus({ preventScroll: true });
+  if (select) {
+    searchInput.select();
+  }
+}
+
 function getFocusStorageArea() {
   return chrome.storage.session ?? chrome.storage.local;
 }
@@ -2589,7 +2596,7 @@ async function loadTabs() {
     } else if (activeEditingLabelTabId !== null) {
       focusTabLabelInput(activeEditingLabelTabId);
     } else {
-      searchInput.focus();
+      focusSearchInput();
     }
   } catch (error) {
     setError(error instanceof Error ? error.message : String(error));
@@ -2705,8 +2712,7 @@ list.addEventListener("scroll", () => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === FOCUS_TAB_SWITCHER_SEARCH_MESSAGE) {
-    searchInput.focus();
-    searchInput.select();
+    focusSearchInput({ select: true });
     sendResponse({ ok: true });
     return true;
   }
@@ -2763,7 +2769,7 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
       closeContextMenu();
-      searchInput.focus();
+      focusSearchInput();
       return;
     }
 
@@ -2830,7 +2836,7 @@ document.addEventListener("keydown", (event) => {
     if (searchInput.value) {
       searchInput.value = "";
       searchInput.dispatchEvent(new Event("input"));
-      searchInput.focus();
+      focusSearchInput();
       return;
     }
 
