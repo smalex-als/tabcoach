@@ -3,7 +3,17 @@
   "name": "Tabcoach",
   "version": "0.1.0",
   "description": "Keyboard-driven Chrome tab switching with optional local Tabcoach server sync.",
-  "permissions": ["tabs", "tabGroups", "alarms", "scripting", "activeTab", "bookmarks", "clipboardWrite", "storage"],
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "alarms",
+    "scripting",
+    "activeTab",
+    "bookmarks",
+    "clipboardWrite",
+    "storage",
+    "notifications"
+  ],
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true

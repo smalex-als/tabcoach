@@ -7,6 +7,8 @@ const DEFAULT_SETTINGS = {
   switcherOpenLeft: false,
   showRecentTabIndent: true,
   badgeMode: "both",
+  smartGroupMode: "off",
+  smartGroupRules: "",
   workspaceLaunchGroups: []
 };
 const SYNC_ENDPOINT = "/api/sync";
@@ -15,6 +17,8 @@ const TAB_SWITCH_STATS_ENDPOINT = "/api/tab-switch-stats";
 const TAB_EVENT_LOG_ENDPOINT = "/api/tab-event";
 const DESKTOP_APPS_ENDPOINT = "/api/desktop-apps";
 const DESKTOP_APP_LAUNCH_ENDPOINT = "/api/desktop-apps/launch";
+const SUGGEST_GROUPS_ENDPOINT = "/api/suggest-groups";
+const SUGGEST_GROUP_FOR_TAB_ENDPOINT = "/api/suggest-group-for-tab";
 const SYNC_ALARM = "tabcoach-sync";
 const SYNC_DEBOUNCE_MS = 1500;
 const DEFAULT_SWITCHER_POPUP_WIDTH = 940;
@@ -25,6 +29,7 @@ const TRANSIENT_RETRY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_DELAY_MS = 500;
 const NUMERIC_BOOKMARK_BADGE_MS = 1500;
 const ACTION_TITLE = "Tabcoach";
+const BACKGROUND_BUILD = "smart-group-9";
 const TAB_SWITCHER_PAGE = "tab-switcher.html";
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
@@ -54,6 +59,22 @@ const ADD_APP_BOOKMARK_MESSAGE = "tabcoach:add-app-bookmark";
 const OPEN_APP_BOOKMARK_MESSAGE = "tabcoach:open-app-bookmark";
 const GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE = "tabcoach:get-workspace-launch-groups";
 const LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE = "tabcoach:launch-workspace-launch-group";
+const SUGGEST_TAB_GROUPS_MESSAGE = "tabcoach:suggest-tab-groups";
+const APPLY_TAB_GROUPS_MESSAGE = "tabcoach:apply-tab-groups";
+const SUGGEST_GROUP_FOR_TAB_MESSAGE = "tabcoach:suggest-group-for-tab";
+const RESOLVE_SMART_GROUP_PROMPT_MESSAGE = "tabcoach:resolve-smart-group-prompt";
+const MAX_GROUPING_TABS = 200;
+const MAX_GROUPING_TITLE_LENGTH = 120;
+const MAX_GROUPING_URL_LENGTH = 180;
+const TAB_GROUP_COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"];
+const MAX_SMART_GROUP_SAMPLE_TITLES = 12;
+const MAX_SMART_GROUP_SITES = 5;
+const MAX_SMART_GROUP_RULES_LENGTH = 2000;
+const MAX_SMART_GROUP_REQUESTS_IN_FLIGHT = 3;
+const SMART_GROUP_PROMPTS_KEY = "smartGroupPrompts";
+const SMART_GROUP_NOTIFICATION_PREFIX = "tabcoach-smart-group-";
+const SMART_GROUP_PROMPT_TTL_MS = 10 * 60 * 1000;
+const SMART_GROUP_MODES = new Set(["off", "ask", "auto"]);
 const BOOKMARK_FOLDER_TITLE = "Tabcoach";
 const APP_BOOKMARK_FOLDER_TITLE = "App Bookmarks";
 const ASSIGN_NUMERIC_BOOKMARK_COMMAND_PREFIX = "assign-numeric-bookmark-";
@@ -61,6 +82,7 @@ const JUMP_NUMERIC_BOOKMARK_COMMAND_PREFIX = "jump-numeric-bookmark-";
 const PREVIOUS_TAB_COMMAND = "previous-tab";
 const NEXT_TAB_IN_HISTORY_COMMAND = "next-tab-in-history";
 const TAB_ACTIVATION_HISTORY_KEY = "tabActivationHistory";
+const RECENT_TAB_CREATIONS_KEY = "recentTabCreations";
 const TAB_FORWARD_HISTORY_KEY = "tabForwardHistory";
 const MAX_TAB_ACTIVATION_HISTORY_PER_WINDOW = 25;
 
@@ -94,6 +116,8 @@ let lastServerHealth = {
   badgeText: ""
 };
 const recentTabCreations = new Map();
+const smartGroupEvaluatedTabIds = new Set();
+let smartGroupRequestsInFlight = 0;
 const tabActivationHistoryByWindowId = new Map();
 const tabForwardHistoryByWindowId = new Map();
 const suppressedActivationHistoryByWindowId = new Map();
@@ -175,6 +199,8 @@ function sanitizeSettings(settings) {
     switcherOpenLeft: Boolean(settings.switcherOpenLeft),
     showRecentTabIndent: settings.showRecentTabIndent !== false,
     badgeMode: badgeModes.has(settings.badgeMode) ? settings.badgeMode : DEFAULT_SETTINGS.badgeMode,
+    smartGroupMode: SMART_GROUP_MODES.has(settings.smartGroupMode) ? settings.smartGroupMode : DEFAULT_SETTINGS.smartGroupMode,
+    smartGroupRules: typeof settings.smartGroupRules === "string" ? settings.smartGroupRules.trim().slice(0, MAX_SMART_GROUP_RULES_LENGTH) : "",
     workspaceLaunchGroups: sanitizeWorkspaceLaunchGroups(settings.workspaceLaunchGroups)
   };
 }
@@ -621,7 +647,45 @@ function markTabCreated(tabId) {
     return;
   }
 
-  recentTabCreations.set(tabId, Date.now());
+  const createdAt = Date.now();
+  recentTabCreations.set(tabId, createdAt);
+  void persistTabCreation(tabId, createdAt);
+}
+
+async function persistTabCreation(tabId, createdAt) {
+  try {
+    const area = getTabHistoryStorageArea();
+    const stored = await area.get({ [RECENT_TAB_CREATIONS_KEY]: {} });
+    const marks = stored[RECENT_TAB_CREATIONS_KEY] ?? {};
+    const cutoff = Date.now() - NEW_TAB_DUPLICATE_GRACE_MS;
+
+    for (const [key, value] of Object.entries(marks)) {
+      if (typeof value !== "number" || value <= cutoff) {
+        delete marks[key];
+      }
+    }
+
+    marks[tabId] = createdAt;
+    await area.set({ [RECENT_TAB_CREATIONS_KEY]: marks });
+  } catch (error) {
+    console.warn("Tabcoach tab creation persistence failed", error);
+  }
+}
+
+// The in-memory map is lost whenever the service worker restarts, so fall back
+// to the session-backed marks before deciding a tab is not newly created.
+async function isRecentlyCreatedTab(tabId) {
+  if (recentTabCreations.has(tabId)) {
+    return true;
+  }
+
+  try {
+    const stored = await getTabHistoryStorageArea().get({ [RECENT_TAB_CREATIONS_KEY]: {} });
+    const createdAt = stored[RECENT_TAB_CREATIONS_KEY]?.[tabId];
+    return typeof createdAt === "number" && Date.now() - createdAt < NEW_TAB_DUPLICATE_GRACE_MS;
+  } catch {
+    return false;
+  }
 }
 
 function cleanupRecentTabCreations() {
@@ -953,12 +1017,39 @@ async function collectBookmarkedTabIds(tabs, tabGroupsById) {
   return bookmarkedTabIds;
 }
 
+async function collectSmartGroupPromptsByTabId(windowId) {
+  const prompts = await readSmartGroupPrompts();
+  const cutoff = Date.now() - SMART_GROUP_PROMPT_TTL_MS;
+  const byTabId = new Map();
+
+  for (const [promptId, record] of Object.entries(prompts)) {
+    if (typeof record?.createdAt !== "number" || record.createdAt <= cutoff) {
+      continue;
+    }
+
+    if (typeof windowId === "number" && typeof record.windowId === "number" && record.windowId !== windowId) {
+      continue;
+    }
+
+    byTabId.set(record.tabId, {
+      id: promptId,
+      kind: record.kind,
+      groupId: record.groupId,
+      groupTitle: record.groupTitle,
+      previousGroupTitle: record.previousGroupTitle ?? ""
+    });
+  }
+
+  return byTabId;
+}
+
 async function collectTabSwitcherItems(windowId) {
   const currentWindowTabs = await chrome.tabs.query({ windowId });
   const tabGroups = await chrome.tabGroups.query({ windowId });
   const tabGroupsById = new Map(tabGroups.map((group) => [group.id, group]));
   const bookmarkedTabIds = await collectBookmarkedTabIds(currentWindowTabs, tabGroupsById);
   const closedBookmarksByGroupId = await collectClosedBookmarksByGroupId(tabGroups);
+  const smartGroupPromptsByTabId = await collectSmartGroupPromptsByTabId(windowId);
 
   const items = currentWindowTabs.map((tab) => {
     const group = typeof tab.groupId === "number" && tab.groupId >= 0 ? tabGroupsById.get(tab.groupId) : null;
@@ -972,7 +1063,8 @@ async function collectTabSwitcherItems(windowId) {
             closedBookmarks: group ? closedBookmarksByGroupId.get(group.id) ?? [] : []
           }
         : null,
-      bookmarked: Boolean(typeof tab.id === "number" && bookmarkedTabIds.has(tab.id))
+      bookmarked: Boolean(typeof tab.id === "number" && bookmarkedTabIds.has(tab.id)),
+      smartGroupPrompt: smartGroupPromptsByTabId.get(tab.id) ?? null
     };
   });
 
@@ -1837,6 +1929,598 @@ async function setTabGroupFromSwitcher(tabId, groupId, context = {}) {
   return collectTabSwitcherItems(targetTab.windowId);
 }
 
+function buildGroupingTabPayload(items) {
+  return items
+    .filter((item) => typeof item.id === "number" && !item.pinned)
+    .slice(0, MAX_GROUPING_TABS)
+    .map((item) => ({
+      id: item.id,
+      title: (item.displayTitle || item.title || "").slice(0, MAX_GROUPING_TITLE_LENGTH),
+      url: (item.url || "").slice(0, MAX_GROUPING_URL_LENGTH),
+      group: item.group?.title || ""
+    }));
+}
+
+async function suggestTabGroupsFromSwitcher(context = {}) {
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId !== "number") {
+    throw new Error("Invalid window id");
+  }
+
+  const settings = await getSettings();
+  if (!settings.localServerEnabled) {
+    throw new Error("Group suggestions need the local Tabcoach server; enable it in settings");
+  }
+
+  const items = await collectTabSwitcherItems(windowId);
+  const payloadTabs = buildGroupingTabPayload(items);
+  if (payloadTabs.length < 2) {
+    throw new Error("Not enough groupable tabs in this window");
+  }
+
+  const response = await fetchLocalServer(
+    "suggest-groups",
+    SUGGEST_GROUPS_ENDPOINT,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        source: "tab-switcher",
+        tabs: payloadTabs,
+        rules: settings.smartGroupRules || ""
+      })
+    },
+    settings
+  );
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok || !result?.ok) {
+    throw new Error(result?.error || `Group suggestion server returned ${response.status}`);
+  }
+
+  return {
+    groups: Array.isArray(result.groups) ? result.groups : [],
+    tabs: items,
+    model: typeof result.model === "string" ? result.model : ""
+  };
+}
+
+async function applyTabGroupPlanFromSwitcher(groups, context = {}) {
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId !== "number") {
+    throw new Error("Invalid window id");
+  }
+
+  if (!Array.isArray(groups) || groups.length === 0) {
+    throw new Error("No groups to apply");
+  }
+
+  const targetWindow = await chrome.windows.get(windowId);
+  if (targetWindow.type !== "normal") {
+    throw new Error("Tab groups are only supported in normal browser windows");
+  }
+
+  const windowTabs = await chrome.tabs.query({ windowId });
+  const groupableTabIds = new Set(
+    windowTabs.filter((tab) => typeof tab.id === "number" && !tab.pinned).map((tab) => tab.id)
+  );
+  const existingGroups = await chrome.tabGroups.query({ windowId });
+  const groupIdsByTitle = new Map(
+    existingGroups
+      .filter((group) => typeof group.title === "string" && group.title.trim())
+      .map((group) => [group.title.trim().toLowerCase(), group.id])
+  );
+
+  const usedTabIds = new Set();
+  let appliedGroupCount = 0;
+  let appliedTabCount = 0;
+
+  for (const group of groups) {
+    const title = typeof group?.title === "string" ? group.title.trim().slice(0, 30) : "";
+    const color = TAB_GROUP_COLORS.includes(group?.color) ? group.color : "grey";
+    const tabIds = (Array.isArray(group?.tabIds) ? group.tabIds : [])
+      .map((tabId) => Number(tabId))
+      .filter((tabId) => Number.isInteger(tabId) && groupableTabIds.has(tabId) && !usedTabIds.has(tabId));
+
+    if (!title || tabIds.length === 0) {
+      continue;
+    }
+
+    tabIds.forEach((tabId) => usedTabIds.add(tabId));
+
+    const existingGroupId = groupIdsByTitle.get(title.toLowerCase());
+    const groupId = typeof existingGroupId === "number"
+      ? await chrome.tabs.group({ groupId: existingGroupId, tabIds })
+      : await chrome.tabs.group({ tabIds, createProperties: { windowId } });
+
+    groupIdsByTitle.set(title.toLowerCase(), groupId);
+    await chrome.tabGroups.update(groupId, { title, color });
+    appliedGroupCount += 1;
+    appliedTabCount += tabIds.length;
+  }
+
+  if (appliedGroupCount === 0) {
+    throw new Error("None of the suggested tabs are still groupable");
+  }
+
+  return {
+    tabs: await collectTabSwitcherItems(windowId),
+    appliedGroupCount,
+    appliedTabCount
+  };
+}
+
+function getHostname(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+// A representative slice rather than the first N tabs, so a large group is not
+// described only by whatever happens to sit at its left edge.
+function pickSpread(items, limit) {
+  if (items.length <= limit) {
+    return items;
+  }
+
+  const step = items.length / limit;
+  return Array.from({ length: limit }, (_, index) => items[Math.floor(index * step)]);
+}
+
+function summarizeGroupSites(groupTabs) {
+  const counts = new Map();
+
+  for (const tab of groupTabs) {
+    const host = getHostname(tab.url || "");
+    if (host) {
+      counts.set(host, (counts.get(host) ?? 0) + 1);
+    }
+  }
+
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, MAX_SMART_GROUP_SITES)
+    .map(([host, count]) => ({ host, count }));
+}
+
+async function collectSmartGroupCandidates(windowId) {
+  const groups = await chrome.tabGroups.query({ windowId });
+  if (groups.length === 0) {
+    return [];
+  }
+
+  const windowTabs = await chrome.tabs.query({ windowId });
+
+  return groups.map((group) => {
+    const groupTabs = windowTabs.filter((tab) => tab.groupId === group.id);
+
+    return {
+      id: group.id,
+      title: group.title?.trim() || "Untitled group",
+      color: group.color ?? "grey",
+      tabCount: groupTabs.length,
+      topSites: summarizeGroupSites(groupTabs),
+      sampleTabs: pickSpread(groupTabs, MAX_SMART_GROUP_SAMPLE_TITLES).map((tab) => ({
+        title: (tab.title || "").slice(0, MAX_GROUPING_TITLE_LENGTH),
+        host: getHostname(tab.url || "")
+      }))
+    };
+  });
+}
+
+// Which tab spawned this one is a strong hint, so pass it along.
+async function describeOpenerTab(openerTabId) {
+  if (typeof openerTabId !== "number") {
+    return null;
+  }
+
+  const opener = await chrome.tabs.get(openerTabId).catch(() => null);
+  if (!opener) {
+    return null;
+  }
+
+  return {
+    title: (opener.title || "").slice(0, MAX_GROUPING_TITLE_LENGTH),
+    host: getHostname(opener.url || ""),
+    groupId: typeof opener.groupId === "number" && opener.groupId >= 0 ? opener.groupId : null
+  };
+}
+
+async function requestSmartGroupChoice(tab, groups, settings) {
+  const response = await fetchLocalServer(
+    "suggest-group-for-tab",
+    SUGGEST_GROUP_FOR_TAB_ENDPOINT,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        source: tab.source ?? "new-tab",
+        tab: {
+          id: tab.id,
+          title: (tab.title || "").slice(0, MAX_GROUPING_TITLE_LENGTH),
+          url: (tab.url || "").slice(0, MAX_GROUPING_URL_LENGTH),
+          currentGroupId: typeof tab.groupId === "number" && tab.groupId >= 0 ? tab.groupId : null,
+          openedFrom: tab.openedFrom ?? null
+        },
+        groups,
+        rules: settings.smartGroupRules || ""
+      })
+    },
+    settings
+  );
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok || !result?.ok) {
+    throw new Error(result?.error || `Group choice server returned ${response.status}`);
+  }
+
+  return result;
+}
+
+// The page-injected prompt needs host permissions or an activeTab grant from a
+// user gesture, neither of which exists for an automatic background decision.
+// System notifications work without either, and survive a service worker restart
+// because the pending decision is stored in session storage.
+async function readSmartGroupPrompts() {
+  try {
+    const stored = await getTabHistoryStorageArea().get({ [SMART_GROUP_PROMPTS_KEY]: {} });
+    return stored[SMART_GROUP_PROMPTS_KEY] ?? {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeSmartGroupPrompts(prompts) {
+  try {
+    await getTabHistoryStorageArea().set({ [SMART_GROUP_PROMPTS_KEY]: prompts });
+  } catch (error) {
+    console.warn("Tabcoach smart group prompt persistence failed", error);
+  }
+}
+
+async function takeSmartGroupPrompt(notificationId) {
+  const prompts = await readSmartGroupPrompts();
+  const record = prompts[notificationId];
+  if (record) {
+    delete prompts[notificationId];
+    await writeSmartGroupPrompts(prompts);
+  }
+
+  return record ?? null;
+}
+
+async function createSmartGroupPrompt(record) {
+  const notificationId = `${SMART_GROUP_NOTIFICATION_PREFIX}${record.tabId}-${Date.now()}`;
+  const isUndo = record.kind === "undo";
+  const prompts = await readSmartGroupPrompts();
+  const cutoff = Date.now() - SMART_GROUP_PROMPT_TTL_MS;
+
+  for (const [key, value] of Object.entries(prompts)) {
+    if (typeof value?.createdAt !== "number" || value.createdAt <= cutoff) {
+      delete prompts[key];
+    }
+  }
+
+  // Store the decision before trying to show it. The notification is only one of
+  // two ways to answer it; the tab switcher reads the stored record directly, so
+  // a blocked or unavailable notification must not throw the suggestion away.
+  prompts[notificationId] = { ...record, createdAt: Date.now() };
+  await writeSmartGroupPrompts(prompts);
+  logSmartGroup(isUndo ? "move recorded, offering undo" : "suggestion recorded, look for the star in the switcher", {
+    tabId: record.tabId,
+    group: record.groupTitle,
+    notificationId
+  });
+  notifyTabSwitcherRefresh(record.windowId);
+
+  if (!chrome.notifications?.create) {
+    logSmartGroup("notifications are unavailable; answer it in the tab switcher", { tabId: record.tabId });
+    return;
+  }
+
+  try {
+    await chrome.notifications.create(notificationId, {
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icon-128.png"),
+      title: isUndo ? `Moved to "${record.groupTitle}"` : "Tabcoach",
+      message: isUndo
+        ? `"${record.tabTitle}" joined "${record.groupTitle}".`
+        : record.previousGroupTitle
+          ? `Move "${record.tabTitle}" from "${record.previousGroupTitle}" to "${record.groupTitle}"?`
+          : `Move "${record.tabTitle}" to "${record.groupTitle}"?`,
+      buttons: isUndo ? [{ title: "Undo" }, { title: "Keep" }] : [{ title: "Move" }, { title: "Not now" }],
+      requireInteraction: true
+    });
+    logSmartGroup("notification shown", { tabId: record.tabId, notificationId });
+  } catch (error) {
+    logSmartGroup("notification could not be shown; answer it in the tab switcher", {
+      tabId: record.tabId,
+      error: getErrorMessage(error)
+    });
+  }
+}
+
+async function handleSmartGroupPromptButton(notificationId, buttonIndex) {
+  if (typeof notificationId !== "string" || !notificationId.startsWith(SMART_GROUP_NOTIFICATION_PREFIX)) {
+    return;
+  }
+
+  const record = await takeSmartGroupPrompt(notificationId);
+  void chrome.notifications?.clear(notificationId).catch(() => {});
+
+  if (!record) {
+    logSmartGroup("notification answered but the decision was already gone", { notificationId });
+    return;
+  }
+
+  if (buttonIndex !== 0) {
+    logSmartGroup("notification dismissed", { tabId: record.tabId, group: record.groupTitle });
+    return;
+  }
+
+  const tab = await chrome.tabs.get(record.tabId).catch(() => null);
+  if (!tab) {
+    logSmartGroup("notification answered but the tab is gone", { tabId: record.tabId });
+    return;
+  }
+
+  if (record.kind === "undo") {
+    await undoSmartGroupMove(record.tabId, record.previousIndex, record.previousGroupId);
+    logSmartGroup("move undone", { tabId: record.tabId, group: record.groupTitle });
+    return;
+  }
+
+  const liveGroupId = typeof tab.groupId === "number" ? tab.groupId : -1;
+  if (liveGroupId !== record.previousGroupId) {
+    logSmartGroup("skipped, tab was regrouped before the answer", { tabId: record.tabId, liveGroupId });
+    return;
+  }
+
+  await moveTabIntoGroup(record.tabId, record.groupId);
+  logSmartGroup("moved after the notification", { tabId: record.tabId, group: record.groupTitle });
+}
+
+async function moveTabIntoGroup(tabId, groupId) {
+  await chrome.tabs.group({ groupId, tabIds: [tabId] });
+  await chrome.tabGroups.update(groupId, { collapsed: false });
+  notifyTabSwitcherRefresh();
+}
+
+async function undoSmartGroupMove(tabId, previousIndex, previousGroupId = -1) {
+  if (Number.isInteger(previousGroupId) && previousGroupId >= 0) {
+    await chrome.tabs.group({ groupId: previousGroupId, tabIds: [tabId] });
+  } else {
+    await chrome.tabs.ungroup(tabId);
+  }
+
+  if (Number.isInteger(previousIndex) && previousIndex >= 0) {
+    await chrome.tabs.move(tabId, { index: previousIndex });
+  }
+  notifyTabSwitcherRefresh();
+}
+
+function isSmartGroupCandidateUrl(url) {
+  return typeof url === "string" && /^https?:\/\//.test(url);
+}
+
+function logSmartGroup(message, details = {}) {
+  console.info(`Tabcoach smart grouping: ${message}`, details);
+}
+
+async function maybeSmartGroupNewTab(tabId, { force = false } = {}) {
+  if (typeof tabId !== "number") {
+    return;
+  }
+
+  if (!force && smartGroupEvaluatedTabIds.has(tabId)) {
+    logSmartGroup("skipped, tab already evaluated", { tabId });
+    return;
+  }
+
+  if (!force && !(await isRecentlyCreatedTab(tabId))) {
+    logSmartGroup("skipped, not a recently created tab", { tabId });
+    return;
+  }
+
+  const settings = await getSettings();
+  if (settings.smartGroupMode === "off") {
+    logSmartGroup("skipped, smart grouping is off in settings", { tabId });
+    return;
+  }
+
+  if (!settings.localServerEnabled) {
+    logSmartGroup("skipped, local server integration is disabled", { tabId });
+    return;
+  }
+
+  if (smartGroupRequestsInFlight >= MAX_SMART_GROUP_REQUESTS_IN_FLIGHT) {
+    logSmartGroup("skipped, too many requests in flight", { tabId, smartGroupRequestsInFlight });
+    return;
+  }
+
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) {
+    logSmartGroup("skipped, tab is gone", { tabId });
+    return;
+  }
+
+  if (tab.pinned) {
+    logSmartGroup("skipped, tab is pinned", { tabId, url: tab.url });
+    return;
+  }
+
+  if (!isSmartGroupCandidateUrl(tab.url)) {
+    logSmartGroup("skipped, not an http(s) page", { tabId, url: tab.url });
+    return;
+  }
+
+  // Chrome puts a tab opened from a grouped tab into the opener's group. Such a
+  // tab is still worth checking: it only moves when a different group wins.
+  const currentGroupId = typeof tab.groupId === "number" && tab.groupId >= 0 ? tab.groupId : -1;
+
+  const targetWindow = await chrome.windows.get(tab.windowId).catch(() => null);
+  if (targetWindow?.type !== "normal") {
+    logSmartGroup("skipped, window is not a normal browser window", { tabId, windowType: targetWindow?.type });
+    return;
+  }
+
+  const groups = await collectSmartGroupCandidates(tab.windowId);
+  if (groups.length === 0) {
+    logSmartGroup("skipped, this window has no tab groups to choose from", { tabId, windowId: tab.windowId });
+    return;
+  }
+
+  smartGroupEvaluatedTabIds.add(tabId);
+  smartGroupRequestsInFlight += 1;
+  logSmartGroup("asking the local server", { tabId, title: tab.title, groups: groups.map((group) => group.title) });
+
+  const openedFrom = await describeOpenerTab(tab.openerTabId);
+
+  let choice;
+  try {
+    choice = await requestSmartGroupChoice({ ...tab, openedFrom }, groups, settings);
+  } catch (error) {
+    logSmartGroup("server request failed", { tabId, error: getErrorMessage(error) });
+    throw error;
+  } finally {
+    smartGroupRequestsInFlight -= 1;
+  }
+
+  const groupId = Number(choice?.groupId);
+  const targetGroup = groups.find((group) => group.id === groupId);
+  if (!targetGroup) {
+    logSmartGroup("no group chosen", {
+      tabId,
+      confidence: choice?.confidence,
+      reason: choice?.reason,
+      belowThreshold: choice?.belowThreshold
+    });
+    return;
+  }
+
+  logSmartGroup("group chosen", {
+    tabId,
+    group: targetGroup.title,
+    confidence: choice?.confidence,
+    reason: choice?.reason,
+    mode: settings.smartGroupMode
+  });
+
+  if (groupId === currentGroupId) {
+    logSmartGroup("nothing to do, tab is already in the chosen group", { tabId, group: targetGroup.title });
+    return;
+  }
+
+  const liveTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!liveTab) {
+    logSmartGroup("skipped, tab was closed while waiting", { tabId });
+    return;
+  }
+
+  const liveGroupId = typeof liveTab.groupId === "number" ? liveTab.groupId : -1;
+  if (liveGroupId !== currentGroupId) {
+    logSmartGroup("skipped, tab was regrouped while waiting", { tabId, liveGroupId });
+    return;
+  }
+
+  const previousGroupTitle = currentGroupId >= 0 ? groups.find((group) => group.id === currentGroupId)?.title ?? "" : "";
+
+  const promptRecord = {
+    tabId,
+    windowId: tab.windowId,
+    tabTitle: (liveTab.title || tab.title || "This tab").slice(0, 60),
+    groupId,
+    groupTitle: targetGroup.title,
+    previousGroupId: currentGroupId,
+    previousGroupTitle,
+    previousIndex: liveTab.index
+  };
+
+  if (settings.smartGroupMode === "auto") {
+    await moveTabIntoGroup(tabId, groupId);
+    logSmartGroup("moved automatically", { tabId, group: targetGroup.title });
+    await createSmartGroupPrompt({ ...promptRecord, kind: "undo" });
+    return;
+  }
+
+  await createSmartGroupPrompt({ ...promptRecord, kind: "move" });
+}
+
+async function resolveSmartGroupPromptFromSwitcher(promptId, accept, context = {}) {
+  if (typeof promptId !== "string" || !promptId) {
+    throw new Error("Invalid suggestion id");
+  }
+
+  const windowId = getSwitcherContextWindowId(context);
+  if (typeof windowId !== "number") {
+    throw new Error("Invalid window id");
+  }
+
+  await handleSmartGroupPromptButton(promptId, accept ? 0 : 1);
+  notifyTabSwitcherRefresh(windowId);
+  return collectTabSwitcherItems(windowId);
+}
+
+async function suggestGroupForTabFromSwitcher(tabId, context = {}) {
+  if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
+    throw new Error("Invalid tab id");
+  }
+
+  const settings = await getSettings();
+  if (!settings.localServerEnabled) {
+    throw new Error("Group suggestions need the local Tabcoach server; enable it in settings");
+  }
+
+  const tab = await chrome.tabs.get(tabId);
+  assertTabInSwitcherWindow(tab, context, "suggest a group for");
+
+  if (!isSmartGroupCandidateUrl(tab.url)) {
+    throw new Error("Only http(s) tabs can be placed automatically");
+  }
+
+  const groups = await collectSmartGroupCandidates(tab.windowId);
+  if (groups.length === 0) {
+    throw new Error("This window has no tab groups to choose from yet");
+  }
+
+  const choice = await requestSmartGroupChoice(
+    { ...tab, source: "tab-switcher", openedFrom: await describeOpenerTab(tab.openerTabId) },
+    groups,
+    settings
+  );
+  const chosenGroupId = Number(choice?.groupId);
+  const group = Number.isInteger(chosenGroupId) ? await chrome.tabGroups.get(chosenGroupId).catch(() => null) : null;
+
+  return {
+    groupId: group ? group.id : null,
+    groupTitle: group?.title?.trim() || "Untitled group",
+    groupColor: group?.color || "grey",
+    confidence: typeof choice?.confidence === "number" ? choice.confidence : null,
+    reason: typeof choice?.reason === "string" ? choice.reason : "",
+    belowThreshold: Boolean(choice?.belowThreshold),
+    model: typeof choice?.model === "string" ? choice.model : ""
+  };
+}
+
+// Manual trigger for debugging from the service worker console: smartGroupActiveTab()
+async function smartGroupActiveTab() {
+  const focusedWindow = await chrome.windows.getLastFocused({ populate: true, windowTypes: ["normal"] });
+  const activeTab = focusedWindow.tabs?.find((tab) => tab.active);
+  if (!activeTab || typeof activeTab.id !== "number") {
+    logSmartGroup("no active tab found", {});
+    return;
+  }
+
+  smartGroupEvaluatedTabIds.delete(activeTab.id);
+  return maybeSmartGroupNewTab(activeTab.id, { force: true });
+}
+
 async function setGroupCollapsedFromSwitcher(groupId, collapsed, context = {}) {
   if (typeof groupId !== "number" || !Number.isInteger(groupId) || groupId < 0) {
     throw new Error("Invalid group id");
@@ -2579,6 +3263,20 @@ chrome.runtime.onStartup.addListener(() => {
   });
 });
 
+if (chrome.notifications?.onButtonClicked) {
+  chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+    void handleSmartGroupPromptButton(notificationId, buttonIndex).catch((error) => {
+      console.warn("Tabcoach smart group notification handling failed", error);
+    });
+  });
+
+  chrome.notifications.onClosed.addListener((notificationId) => {
+    if (typeof notificationId === "string" && notificationId.startsWith(SMART_GROUP_NOTIFICATION_PREFIX)) {
+      void takeSmartGroupPrompt(notificationId);
+    }
+  });
+}
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "sync") {
     return;
@@ -2619,6 +3317,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (typeof tabId === "number") {
     cleanupRecentTabCreations();
   }
+  if (changeInfo?.status === "complete") {
+    void maybeSmartGroupNewTab(tabId).catch((error) => {
+      console.warn("Tabcoach smart grouping failed", error);
+    });
+  }
   notifyTabSwitcherRefresh(tab?.windowId);
   scheduleSync("tab-updated");
 });
@@ -2626,6 +3329,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   if (typeof tabId === "number") {
     recentTabCreations.delete(tabId);
+    smartGroupEvaluatedTabIds.delete(tabId);
     void removeTabFromActivationHistory(tabId, removeInfo?.windowId);
   }
   notifyTabSwitcherRefresh(removeInfo?.windowId);
@@ -2836,6 +3540,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === SUGGEST_TAB_GROUPS_MESSAGE) {
+    void suggestTabGroupsFromSwitcher(switcherContext)
+      .then((result) => {
+        sendResponse({ ok: true, ...result });
+      })
+      .catch((error) => {
+        console.error("Tabcoach tab group suggestion failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === RESOLVE_SMART_GROUP_PROMPT_MESSAGE) {
+    void resolveSmartGroupPromptFromSwitcher(message.promptId, Boolean(message.accept), switcherContext)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach smart group prompt resolve failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === SUGGEST_GROUP_FOR_TAB_MESSAGE) {
+    void suggestGroupForTabFromSwitcher(message.tabId, switcherContext)
+      .then((result) => {
+        sendResponse({ ok: true, ...result });
+      })
+      .catch((error) => {
+        console.error("Tabcoach single tab group suggestion failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === APPLY_TAB_GROUPS_MESSAGE) {
+    void applyTabGroupPlanFromSwitcher(message.groups, switcherContext)
+      .then((result) => {
+        sendResponse({ ok: true, ...result });
+      })
+      .catch((error) => {
+        console.error("Tabcoach tab group apply failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
   if (message?.type === COPY_TAB_URL_MESSAGE) {
     void copyTabUrlFromSwitcher(message.tabId, message.url, switcherContext)
       .then(() => {
@@ -3039,3 +3795,20 @@ chrome.commands.onCommand.addListener((command, tab) => {
     });
   }
 });
+
+// Debug entry points, reachable from the service worker console even if the
+// console evaluates outside this script's own scope.
+globalThis.smartGroupActiveTab = smartGroupActiveTab;
+globalThis.maybeSmartGroupNewTab = maybeSmartGroupNewTab;
+
+void getSettings()
+  .then((settings) => {
+    console.info(`Tabcoach background loaded (build ${BACKGROUND_BUILD})`, {
+      smartGroupMode: settings.smartGroupMode,
+      localServerEnabled: settings.localServerEnabled,
+      serverBaseUrl: settings.serverBaseUrl
+    });
+  })
+  .catch(() => {
+    console.info(`Tabcoach background loaded (build ${BACKGROUND_BUILD})`);
+  });

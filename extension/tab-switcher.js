@@ -24,6 +24,10 @@ const ADD_APP_BOOKMARK_MESSAGE = "tabcoach:add-app-bookmark";
 const OPEN_APP_BOOKMARK_MESSAGE = "tabcoach:open-app-bookmark";
 const GET_WORKSPACE_LAUNCH_GROUPS_MESSAGE = "tabcoach:get-workspace-launch-groups";
 const LAUNCH_WORKSPACE_LAUNCH_GROUP_MESSAGE = "tabcoach:launch-workspace-launch-group";
+const SUGGEST_TAB_GROUPS_MESSAGE = "tabcoach:suggest-tab-groups";
+const APPLY_TAB_GROUPS_MESSAGE = "tabcoach:apply-tab-groups";
+const SUGGEST_GROUP_FOR_TAB_MESSAGE = "tabcoach:suggest-group-for-tab";
+const RESOLVE_SMART_GROUP_PROMPT_MESSAGE = "tabcoach:resolve-smart-group-prompt";
 const NUMERIC_BOOKMARKS_KEY = "numericBookmarks";
 const SWITCHER_OPEN_LEFT_KEY = "switcherOpenLeft";
 const SHOW_RECENT_TAB_INDENT_KEY = "showRecentTabIndent";
@@ -65,6 +69,7 @@ const list = document.getElementById("list");
 const desktopApps = document.getElementById("desktopApps");
 const searchInput = document.getElementById("searchInput");
 const newTabButton = document.getElementById("newTabButton");
+const aiGroupButton = document.getElementById("aiGroupButton");
 const closeButton = document.getElementById("closeButton");
 const sortButtons = [...document.querySelectorAll(".sort-button")];
 const shell = document.querySelector(".shell");
@@ -101,6 +106,8 @@ let contextMenu = null;
 let isReplacingListChildren = false;
 let draggedAppBookmarkId = null;
 let appBookmarkDropTarget = null;
+let aiPanel = null;
+let aiPanelState = null;
 const expandedBookmarkGroupIds = new Set();
 
 function sendMessage(message) {
@@ -893,6 +900,398 @@ async function moveTabToGroup(tab, groupId) {
   renderTabs();
   selectedIndex = getRowIndexForTabOrGroup(selectedTabId);
   applyRowState();
+}
+
+function pluralizeCount(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function closeAiPanel() {
+  if (!aiPanel) {
+    return;
+  }
+
+  aiPanel.backdrop.remove();
+  aiPanel = null;
+  aiPanelState = null;
+  aiGroupButton.disabled = false;
+  focusSearchInput();
+}
+
+function createAiPanel() {
+  const backdrop = document.createElement("div");
+  backdrop.className = "ai-panel-backdrop";
+  backdrop.addEventListener("mousedown", (event) => {
+    if (event.target === backdrop) {
+      closeAiPanel();
+    }
+  });
+
+  const panel = document.createElement("div");
+  panel.className = "ai-panel";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-label", "Suggested tab groups");
+
+  const header = document.createElement("header");
+  header.className = "ai-panel-header";
+  const title = document.createElement("h2");
+  title.className = "ai-panel-title";
+  title.textContent = "Suggested groups";
+  const subtitle = document.createElement("p");
+  subtitle.className = "ai-panel-subtitle";
+  header.append(title, subtitle);
+
+  const body = document.createElement("div");
+  body.className = "ai-panel-body";
+
+  const footer = document.createElement("footer");
+  footer.className = "ai-panel-footer";
+  const note = document.createElement("span");
+  note.className = "ai-panel-note";
+  const settingsButton = document.createElement("button");
+  settingsButton.type = "button";
+  settingsButton.className = "ai-panel-button";
+  settingsButton.textContent = "Settings";
+  settingsButton.addEventListener("click", () => {
+    chrome.runtime.openOptionsPage();
+  });
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "ai-panel-button";
+  cancelButton.textContent = "Cancel";
+  cancelButton.addEventListener("click", closeAiPanel);
+  const applyButton = document.createElement("button");
+  applyButton.type = "button";
+  applyButton.className = "ai-panel-button";
+  applyButton.dataset.variant = "primary";
+  applyButton.textContent = "Apply";
+  applyButton.addEventListener("click", () => {
+    void applyAiGroupPlan().catch(reportActionError);
+  });
+  footer.append(note, settingsButton, cancelButton, applyButton);
+
+  panel.append(header, body, footer);
+  backdrop.append(panel);
+  document.body.appendChild(backdrop);
+
+  aiPanel = { backdrop, subtitle, body, note, cancelButton, applyButton };
+  cancelButton.focus();
+}
+
+function updateAiPanelSelectionState() {
+  if (!aiPanel || !aiPanelState) {
+    return;
+  }
+
+  const selectedGroups = getSelectedAiGroups();
+  const selectedTabCount = selectedGroups.reduce((total, group) => total + group.tabIds.length, 0);
+  aiPanel.note.textContent = aiPanelState.status === "ready"
+    ? `${pluralizeCount(selectedGroups.length, "group")} · ${pluralizeCount(selectedTabCount, "tab")}`
+    : "";
+  aiPanel.applyButton.disabled = aiPanelState.status !== "ready" || selectedGroups.length === 0;
+}
+
+function getSelectedAiGroups() {
+  if (!aiPanelState || aiPanelState.status !== "ready") {
+    return [];
+  }
+
+  return aiPanelState.groups.filter((group) => group.selected && group.title.trim() && group.tabIds.length > 0);
+}
+
+function renderAiGroupCard(group) {
+  const card = document.createElement("div");
+  card.className = "ai-group-card";
+  card.dataset.selected = String(group.selected);
+
+  const head = document.createElement("div");
+  head.className = "ai-group-head";
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = group.selected;
+  checkbox.setAttribute("aria-label", `Include group ${group.title}`);
+  checkbox.addEventListener("change", () => {
+    group.selected = checkbox.checked;
+    card.dataset.selected = String(group.selected);
+    updateAiPanelSelectionState();
+  });
+
+  const swatch = document.createElement("span");
+  swatch.className = "ai-group-swatch";
+  swatch.style.background = groupColors[group.color] ?? ungroupedColor;
+
+  const titleInput = document.createElement("input");
+  titleInput.type = "text";
+  titleInput.className = "ai-group-title-input";
+  titleInput.value = group.title;
+  titleInput.maxLength = 30;
+  titleInput.setAttribute("aria-label", "Group title");
+  titleInput.addEventListener("input", () => {
+    group.title = titleInput.value;
+    updateAiPanelSelectionState();
+  });
+
+  const count = document.createElement("span");
+  count.className = "ai-group-count";
+  count.textContent = pluralizeCount(group.tabIds.length, "tab");
+
+  head.append(checkbox, swatch, titleInput, count);
+
+  const tabList = document.createElement("ul");
+  tabList.className = "ai-group-tabs";
+  for (const tabId of group.tabIds) {
+    const item = document.createElement("li");
+    const tab = getTabById(tabId);
+    item.textContent = tab ? formatTabTitle(tab) : `Tab ${tabId}`;
+    tabList.appendChild(item);
+  }
+
+  card.append(head, tabList);
+  return card;
+}
+
+function renderAiPanel() {
+  if (!aiPanel || !aiPanelState) {
+    return;
+  }
+
+  aiPanel.body.replaceChildren();
+  aiPanel.subtitle.textContent = aiPanelState.model ? `via ${aiPanelState.model}` : "";
+
+  if (aiPanelState.status !== "ready") {
+    const status = document.createElement("div");
+    status.className = "ai-panel-status";
+    if (aiPanelState.status === "error") {
+      status.dataset.tone = "error";
+      status.textContent = aiPanelState.error;
+    } else {
+      status.textContent = aiPanelState.status === "applying" ? "Applying groups…" : "Asking OpenAI…";
+    }
+    aiPanel.body.appendChild(status);
+    updateAiPanelSelectionState();
+    return;
+  }
+
+  for (const group of aiPanelState.groups) {
+    aiPanel.body.appendChild(renderAiGroupCard(group));
+  }
+
+  updateAiPanelSelectionState();
+}
+
+function setAiPanelError(error) {
+  if (!aiPanel) {
+    return;
+  }
+
+  console.error("Tabcoach tab group suggestion failed", error);
+  aiPanelState = {
+    status: "error",
+    error: error instanceof Error ? error.message : String(error),
+    groups: [],
+    model: aiPanelState?.model ?? ""
+  };
+  aiPanel.cancelButton.disabled = false;
+  renderAiPanel();
+}
+
+async function suggestTabGroups() {
+  if (aiPanel) {
+    closeAiPanel();
+    return;
+  }
+
+  createAiPanel();
+  aiPanelState = { status: "loading", error: "", groups: [], model: "" };
+  aiGroupButton.disabled = true;
+  renderAiPanel();
+
+  try {
+    const response = await sendMessage({ type: SUGGEST_TAB_GROUPS_MESSAGE }).then((result) =>
+      assertResponse(result, "Group suggestion failed")
+    );
+
+    if (!aiPanel) {
+      return;
+    }
+
+    setTabs(response.tabs);
+    refreshDuplicateCounts();
+    refreshVisibleTabs();
+    renderTabs({ updateRowState: false });
+    aiPanelState = {
+      status: "ready",
+      error: "",
+      model: response.model || "",
+      groups: response.groups.map((group) => ({
+        title: group.title,
+        color: group.color,
+        tabIds: group.tabIds,
+        selected: true
+      }))
+    };
+    renderAiPanel();
+    aiPanel.applyButton.focus();
+  } catch (error) {
+    setAiPanelError(error);
+  } finally {
+    aiGroupButton.disabled = false;
+  }
+}
+
+function createSmartGroupPromptRow(prompt) {
+  const container = document.createElement("div");
+  container.className = "smart-group-prompt";
+
+  const text = document.createElement("span");
+  text.className = "smart-group-prompt-text";
+  if (prompt.kind === "undo") {
+    text.textContent = `Moved to "${prompt.groupTitle}" — keep it?`;
+  } else if (prompt.previousGroupTitle) {
+    text.textContent = `Move from "${prompt.previousGroupTitle}" to "${prompt.groupTitle}"?`;
+  } else {
+    text.textContent = `Move to "${prompt.groupTitle}"?`;
+  }
+
+  const answer = (accept) => {
+    void resolveSmartGroupPrompt(prompt.id, accept).catch(reportActionError);
+  };
+
+  const yesButton = document.createElement("button");
+  yesButton.type = "button";
+  yesButton.className = "smart-group-prompt-button";
+  yesButton.dataset.variant = "primary";
+  yesButton.textContent = prompt.kind === "undo" ? "Keep" : "Yes";
+
+  const noButton = document.createElement("button");
+  noButton.type = "button";
+  noButton.className = "smart-group-prompt-button";
+  noButton.textContent = prompt.kind === "undo" ? "Undo" : "No";
+
+  // The row itself switches tabs on click, so keep these buttons to themselves.
+  for (const [button, accept] of [[yesButton, prompt.kind !== "undo"], [noButton, prompt.kind === "undo"]]) {
+    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      answer(accept);
+    });
+  }
+
+  container.append(text, yesButton, noButton);
+  return container;
+}
+
+async function resolveSmartGroupPrompt(promptId, accept) {
+  const response = await sendMessage({ type: RESOLVE_SMART_GROUP_PROMPT_MESSAGE, promptId, accept }).then((result) =>
+    assertResponse(result, "Suggestion failed")
+  );
+
+  const scrollAnchor = getSelectedScrollAnchor();
+  setTabs(response.tabs);
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+  restoreSelectedScrollAnchor(scrollAnchor);
+}
+
+async function suggestGroupForTab(tab) {
+  if (typeof tab?.id !== "number") {
+    return;
+  }
+
+  if (aiPanel) {
+    closeAiPanel();
+  }
+
+  createAiPanel();
+  aiPanelState = { status: "loading", error: "", groups: [], model: "" };
+  aiGroupButton.disabled = true;
+  renderAiPanel();
+
+  try {
+    const response = await sendMessage({ type: SUGGEST_GROUP_FOR_TAB_MESSAGE, tabId: tab.id }).then((result) =>
+      assertResponse(result, "Group suggestion failed")
+    );
+
+    if (!aiPanel) {
+      return;
+    }
+
+    const details = [response.model, typeof response.confidence === "number" ? `confidence ${response.confidence.toFixed(2)}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+
+    if (typeof response.groupId !== "number") {
+      aiPanelState = {
+        status: "error",
+        error: response.belowThreshold
+          ? `No confident match for this tab${response.reason ? ` (${response.reason})` : ""}`
+          : "No existing group fits this tab",
+        groups: [],
+        model: details
+      };
+      renderAiPanel();
+      return;
+    }
+
+    aiPanelState = {
+      status: "ready",
+      error: "",
+      model: details,
+      groups: [
+        {
+          title: response.groupTitle,
+          color: response.groupColor,
+          tabIds: [tab.id],
+          selected: true
+        }
+      ]
+    };
+    renderAiPanel();
+    aiPanel.applyButton.focus();
+  } catch (error) {
+    setAiPanelError(error);
+  } finally {
+    aiGroupButton.disabled = false;
+  }
+}
+
+async function applyAiGroupPlan() {
+  const groups = getSelectedAiGroups().map((group) => ({
+    title: group.title.trim(),
+    color: group.color,
+    tabIds: group.tabIds
+  }));
+
+  if (groups.length === 0 || !aiPanel) {
+    return;
+  }
+
+  aiPanelState = { ...aiPanelState, status: "applying" };
+  aiPanel.cancelButton.disabled = true;
+  renderAiPanel();
+
+  try {
+    const response = await sendMessage({ type: APPLY_TAB_GROUPS_MESSAGE, groups }).then((result) =>
+      assertResponse(result, "Applying groups failed")
+    );
+    closeAiPanel();
+    sortMode = "window";
+    setTabs(response.tabs);
+    refreshDuplicateCounts();
+    refreshVisibleTabs();
+    renderTabs();
+    selectedIndex = Math.min(selectedIndex, Math.max(rows.length - 1, 0));
+    applyRowState();
+    showShortcutNotification(
+      `Grouped ${pluralizeCount(response.appliedTabCount, "tab")} into ${pluralizeCount(response.appliedGroupCount, "group")}`
+    );
+  } catch (error) {
+    setAiPanelError(error);
+  }
 }
 
 function showShortcutNotification(message) {
@@ -1953,6 +2352,9 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
     createContextMenuItem("Create new group", () => createGroupForTab(tab.id), {
       disabled: !canGroupTab
     }),
+    createContextMenuItem("Suggest group (AI)", () => suggestGroupForTab(tab), {
+      disabled: !canGroupTab
+    }),
     createContextSubmenuItem(
       "Move to group",
       moveGroupOptions.map((option) =>
@@ -2528,6 +2930,16 @@ function renderTabs({ scrollBlock = "nearest", updateRowState = true } = {}) {
       tabTitle.appendChild(tabLabelPill);
     }
 
+    if (tab.smartGroupPrompt) {
+      const suggestionStar = document.createElement("span");
+      suggestionStar.className = "smart-group-star";
+      suggestionStar.textContent = "\u2728";
+      suggestionStar.title = tab.smartGroupPrompt.kind === "undo"
+        ? `Moved to "${tab.smartGroupPrompt.groupTitle}"`
+        : `Suggested group: "${tab.smartGroupPrompt.groupTitle}"`;
+      tabTitle.appendChild(suggestionStar);
+    }
+
     const duplicateCount = duplicateCountsByTabId.get(tab.id);
     if (duplicateCount) {
       const duplicatePill = document.createElement("span");
@@ -2550,6 +2962,8 @@ function renderTabs({ scrollBlock = "nearest", updateRowState = true } = {}) {
     tabUrl.className = "tab-url";
     tabUrl.textContent = formatUrl(tab.url);
 
+    const smartGroupPrompt = tab.smartGroupPrompt ? createSmartGroupPromptRow(tab.smartGroupPrompt) : null;
+
     const status = document.createElement("div");
     status.className = "status";
     status.textContent = [tab.active ? "Active" : "", tab.pinned ? "Pinned" : ""].filter(Boolean).join(" ");
@@ -2565,6 +2979,9 @@ function renderTabs({ scrollBlock = "nearest", updateRowState = true } = {}) {
     const closeTabButton = createButton("close", "×", `Close ${tab.displayTitle || tab.title || tab.url || "tab"}`, () => closeTab(tab.id));
 
     text.append(tabTitle, tabUrl);
+    if (smartGroupPrompt) {
+      text.appendChild(smartGroupPrompt);
+    }
     row.append(icon, text, status, bookmarkButton, closeTabButton);
     rows.push(row);
     tabRows.push(row);
@@ -2669,6 +3086,10 @@ closeButton.addEventListener("click", () => {
 
 newTabButton.addEventListener("click", () => {
   void createNewTab().catch(reportActionError);
+});
+
+aiGroupButton.addEventListener("click", () => {
+  void suggestTabGroups().catch(reportActionError);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -2807,6 +3228,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (aiPanel) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeAiPanel();
+    }
+    return;
+  }
+
   if (
     event.target instanceof HTMLElement &&
     (event.target.closest(".tab-label-input") || event.target.closest(".section-rename-input"))

@@ -54,6 +54,13 @@ Server defaults:
 - `TAB_SWITCH_LOG_PATH`: `tab-switch-log.jsonl`
 - `TAB_EVENT_LOG_PATH`: `tabcoach-events.jsonl`
 - `DESKTOP_APPS_JSON`: optional desktop app allowlist, defaults to Obsidian, iTerm, IntelliJ IDEA, WebStorm, and PyCharm when unset; set to `[]` to disable desktop app buttons
+- `OPENAI_API_KEY`: required for AI tab grouping, unset by default
+- `OPENAI_MODEL`: `gpt-5.6-luna`
+- `OPENAI_BASE_URL`: `https://api.openai.com/v1`
+- `OPENAI_TIMEOUT_MS`: `60000`
+- `SMART_GROUP_MIN_CONFIDENCE`: `0.6`, the minimum model confidence before a new tab is offered a group
+
+The server reads these from a `.env` file in the repository root at startup; copy [.env.example](/Users/smalex/jsprojects/tabcoach/.env.example) to `.env` and fill in the key. `.env` is gitignored and the key is never sent to the extension.
 
 Health check:
 
@@ -113,6 +120,34 @@ Auto-close rules:
 When local server integration is enabled, switching tabs through the `Command+E` popup posts to `POST /api/tab-switch`. The server appends JSON Lines to local `tab-switch-log.jsonl` by default, including timestamp, source, previous tab, and target tab.
 The stats page reads aggregates from `GET /api/tab-switch-stats`, including totals, today, last 7 days, average switches per day, daily counts for the last 7 days, today-specific routes and domain breakdowns, estimated focus time by domain, top target domains, top routes, sources, and recent switches with estimated time spent. Focus intervals longer than 15 minutes are treated as idle and excluded from time totals.
 Copying a tab URL through the popup posts to `POST /api/tab-event`. The server appends JSON Lines to local `tabcoach-events.jsonl` by default. When local server integration is disabled, these server-backed logs and stats are skipped.
+
+## AI Tab Grouping
+
+The ✨ button in the `Command+E` popup asks the local server to propose tab groups for the current window. The server posts the tab titles, URLs, and current group names to the OpenAI Chat Completions API using the key from `.env`, then returns a plan that the popup shows for review. Nothing is regrouped until you press `Apply`; group titles can be edited and individual groups can be unchecked first.
+
+Every call to OpenAI is logged by the server: one line when the request goes out (label, model, schema, body size) and one when it returns (HTTP status, elapsed time, token usage), plus a warning line with the API error message when it fails. Nothing is logged when a request is skipped, so silence in the log means no call was made.
+
+`Your rules` in the same options section takes plain-language hints ("A GitLab merge request belongs either to the group of the ticket I am working on, or to Code Review"). They travel with every request, are fenced off from the tab data in the prompt, and outrank the model's own judgement. Up to 2000 characters; they apply to the ✨ button as well.
+
+Requires local server integration enabled in extension options and `OPENAI_API_KEY` set. The endpoint is `POST /api/suggest-groups`; suggested groups holding fewer than two tabs, unknown tab ids, and repeated tab ids are dropped server-side.
+
+### Smart Grouping For New Tabs
+
+`Smart grouping` in extension options decides what happens when a new tab finishes loading:
+
+- `Off` (default): nothing happens and no request is made
+- `Ask before moving`: a system notification with `Move` / `Not now` buttons
+- `Move automatically`: the tab is moved right away and a notification offers `Undo`
+
+A suggestion is stored before it is shown, so it survives a notification that Chrome or the OS refuses to display — answer it in the popup instead. Pending suggestions also show up inside the `Command+E` popup: the tab row gets a ✨ marker and an inline `Move to "X"? Yes / No` strip (`Keep / Undo` after an automatic move). Answering in either place resolves the same suggestion.
+
+The notification is a Chrome notification rather than an in-page toast on purpose: injecting into a page needs host permissions or an `activeTab` grant from a user gesture, and an automatic background decision has neither. Pending decisions live in session storage, so answering still works after the service worker restarts. Chrome must be allowed to show notifications in the OS for this to be visible.
+
+The server posts the new tab plus the existing groups of that window to `POST /api/suggest-group-for-tab` and returns a group id or `null`. Each group is described by its title, colour, tab count, its top hosts with counts, and up to 12 member tabs (title plus host) sampled evenly across the group rather than taken from its left edge. The tab itself carries the group it currently sits in and, when known, the tab it was opened from. The model also returns the runner-up groups it considered, and the server logs them next to its choice. A request happens at most once per tab, and only for `http(s)` tabs that are not pinned and opened in a window that already has at least one group. Choices below `SMART_GROUP_MIN_CONFIDENCE` are returned as `null`, so nothing moves.
+
+A tab opened from a grouped tab inherits that group from Chrome. Such a tab is still checked, and it only moves when a different group wins; `Undo` puts it back into the group it came from.
+
+The same decision is available on demand: right-click a tab in the `Command+E` popup and choose `Suggest group (AI)`. That path shows errors in the popup itself, which makes it the quickest way to check that the server and key are wired up.
 
 ## Desktop App Launcher
 

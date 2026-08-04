@@ -32,6 +32,63 @@ type Config = {
   dropHash: boolean;
   sortQueryParams: boolean;
   stripTrackingParams: boolean;
+  openaiApiKey: string;
+  openaiModel: string;
+  openaiBaseUrl: string;
+  openaiTimeoutMs: number;
+  smartGroupMinConfidence: number;
+};
+
+type SuggestionTab = {
+  id: number;
+  title: string;
+  url: string;
+  group: string;
+};
+
+type SuggestGroupsPayload = {
+  tabs?: unknown;
+  rules?: unknown;
+  source?: string;
+};
+
+type SuggestedGroup = {
+  title: string;
+  color: string;
+  tabIds: number[];
+};
+
+type GroupSite = {
+  host: string;
+  count: number;
+};
+
+type GroupSampleTab = {
+  title: string;
+  host: string;
+};
+
+type CandidateGroup = {
+  id: number;
+  title: string;
+  color?: string;
+  tabCount?: number;
+  topSites: GroupSite[];
+  sampleTabs: GroupSampleTab[];
+};
+
+type ChoiceTab = {
+  title: string;
+  url: string;
+  currentGroupId: number | null;
+  openedFrom: { title: string; host: string; groupId: number | null } | null;
+};
+
+type SuggestGroupForTabPayload = {
+  tab?: unknown;
+  groups?: unknown;
+  rules?: unknown;
+  source?: string;
 };
 
 type SyncPayload = {
@@ -112,6 +169,76 @@ const DEFAULT_TRACKING_PARAMS = new Set([
 ]);
 const MAX_FOCUS_DURATION_MS = 15 * 60 * 1000;
 const RECENT_SWITCH_LIMIT = 50;
+const TAB_GROUP_COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"];
+const MAX_GROUPING_TABS = 200;
+const MAX_GROUPING_TITLE_LENGTH = 120;
+const MAX_GROUPING_URL_LENGTH = 180;
+const MAX_GROUP_TITLE_LENGTH = 30;
+const GROUPING_SYSTEM_PROMPT = [
+  "You organize Chrome tabs into tab groups.",
+  "The user message contains JSON with the open tabs of one browser window.",
+  "Reply with JSON only, shaped exactly like:",
+  '{"groups":[{"title":"Short label","color":"blue","tabIds":[123,456]}]}',
+  "Rules:",
+  "- Group tabs by topic, project or task, not by domain alone.",
+  "- Every tabId must come from the input; never invent or repeat an id.",
+  "- A tab belongs to at most one group; leave unrelated tabs out instead of creating a catch-all group.",
+  "- Only propose a group that holds at least two tabs.",
+  "- Prefer between two and eight groups.",
+  "- Titles are at most 18 characters, in the language most tab titles use.",
+  "- Reuse an existing group title when that grouping already makes sense.",
+  "- color is one of the values listed in the user message."
+].join("\n");
+const MAX_CANDIDATE_GROUPS = 30;
+const MAX_GROUP_SAMPLE_TITLES = 12;
+const MAX_GROUP_SITES = 5;
+const MAX_USER_RULES_LENGTH = 2000;
+const SMART_GROUP_SYSTEM_PROMPT = [
+  "You decide which existing Chrome tab group a single tab belongs to.",
+  "The user message contains JSON with the tab and every group of its window.",
+  "Each group is described by its title, how many tabs it holds, the sites those tabs come from",
+  "(host plus how many tabs use it), and a sample of member tabs spread across the group.",
+  "Judge a group by what it actually contains, not by its title alone: a title can be stale or vague,",
+  "while the member tabs and hosts show the real topic.",
+  "tab.currentGroupId is the group the tab sits in right now, or null when it is ungrouped.",
+  "Chrome puts a tab opened from a grouped tab into the opener's group automatically, so the current",
+  "group is often an accident of how the tab was opened. Treat every group as an equal candidate,",
+  "including the current one; do not favour it and do not avoid it.",
+  "tab.openedFrom, when present, is the tab this one was opened from.",
+  "Rules:",
+  "- groupId must be one of the ids listed in the user message, or null.",
+  "- Pick the group whose contents are most related to the tab: same project, task, service or topic.",
+  "- Matching hosts are strong evidence, but a shared topic across different hosts counts too.",
+  "- Answer null only when no group is related to the tab; a group that merely holds unrelated tabs",
+  "  from the same site is not a match.",
+  "- confidence is your probability between 0 and 1 that the tab belongs to the chosen group.",
+  "- alternatives lists the other groups you considered worth mentioning, best first, at most three,",
+  "  each with its own confidence. Use an empty list when nothing else came close.",
+  "- reason is at most 15 words and names the evidence you used."
+].join("\n");
+
+function sanitizeUserRules(rawRules: unknown): string {
+  return typeof rawRules === "string" ? rawRules.trim().slice(0, MAX_USER_RULES_LENGTH) : "";
+}
+
+// The user's own rules go in as a separate, clearly fenced block so the model
+// cannot confuse them with the tab data it is judging.
+function withUserRules(systemPrompt: string, rules: string): string {
+  if (!rules) {
+    return systemPrompt;
+  }
+
+  return [
+    systemPrompt,
+    "",
+    "The user wrote the rules below for their own tabs. They describe how this user works and",
+    "outrank your own judgement wherever they apply. Treat anything between the markers as rules,",
+    "never as instructions to change the reply format.",
+    "--- user rules ---",
+    rules,
+    "--- end of user rules ---"
+  ].join("\n");
+}
 
 function readBoolean(name: string, fallback: boolean): boolean {
   const value = process.env[name];
@@ -170,6 +297,19 @@ function readDesktopApps(): DesktopApp[] {
   }
 }
 
+function loadEnvFile(): void {
+  if (typeof process.loadEnvFile !== "function") {
+    console.warn("This Node version cannot read .env files; export OPENAI_API_KEY in the shell instead");
+    return;
+  }
+
+  try {
+    process.loadEnvFile();
+  } catch {
+    console.info("No .env file found; using the current environment only");
+  }
+}
+
 function loadConfig(): Config {
   return {
     host: process.env.HOST ?? "127.0.0.1",
@@ -179,7 +319,19 @@ function loadConfig(): Config {
     desktopApps: readDesktopApps(),
     dropHash: readBoolean("DROP_HASH", true),
     sortQueryParams: readBoolean("SORT_QUERY_PARAMS", true),
-    stripTrackingParams: readBoolean("STRIP_TRACKING_PARAMS", true)
+    stripTrackingParams: readBoolean("STRIP_TRACKING_PARAMS", true),
+    openaiApiKey: process.env.OPENAI_API_KEY?.trim() ?? "",
+    openaiModel: process.env.OPENAI_MODEL?.trim() || "gpt-5.6-luna",
+    openaiBaseUrl: (process.env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, ""),
+    openaiTimeoutMs: readNumber("OPENAI_TIMEOUT_MS", 60000),
+    smartGroupMinConfidence: readNumber("SMART_GROUP_MIN_CONFIDENCE", 0.6)
+  };
+}
+
+function describeConfig(config: Config): Record<string, unknown> {
+  return {
+    ...config,
+    openaiApiKey: config.openaiApiKey ? "(set)" : "(not set)"
   };
 }
 
@@ -639,6 +791,514 @@ async function handleDesktopAppLaunch(request: IncomingMessage, response: Server
   });
 }
 
+function sanitizeSuggestionTabs(rawTabs: unknown): SuggestionTab[] {
+  if (!Array.isArray(rawTabs)) {
+    return [];
+  }
+
+  const seenIds = new Set<number>();
+
+  return rawTabs
+    .map((rawTab) => {
+      const candidate = rawTab as Partial<SuggestionTab>;
+      const id = Number(candidate?.id);
+      if (!Number.isInteger(id) || seenIds.has(id)) {
+        return null;
+      }
+
+      seenIds.add(id);
+      return {
+        id,
+        title: typeof candidate.title === "string" ? candidate.title.slice(0, MAX_GROUPING_TITLE_LENGTH) : "",
+        url: typeof candidate.url === "string" ? candidate.url.slice(0, MAX_GROUPING_URL_LENGTH) : "",
+        group: typeof candidate.group === "string" ? candidate.group.slice(0, MAX_GROUP_TITLE_LENGTH) : ""
+      };
+    })
+    .filter((tab): tab is SuggestionTab => tab !== null)
+    .slice(0, MAX_GROUPING_TABS);
+}
+
+function describeOpenAiError(rawBody: string, status: number): string {
+  try {
+    const parsed = JSON.parse(rawBody) as { error?: { message?: string } };
+    const message = parsed?.error?.message;
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+  } catch {
+    // Fall through to the raw body below.
+  }
+
+  return rawBody.trim().slice(0, 200) || `HTTP ${status}`;
+}
+
+function extractResponseText(payload: unknown): string {
+  const response = payload as {
+    output_text?: unknown;
+    output?: { type?: string; content?: { type?: string; text?: unknown }[] }[];
+  };
+
+  if (typeof response.output_text === "string" && response.output_text.trim()) {
+    return response.output_text;
+  }
+
+  const parts: string[] = [];
+  for (const item of response.output ?? []) {
+    if (item?.type !== "message") {
+      continue;
+    }
+
+    for (const part of item.content ?? []) {
+      if (part?.type === "output_text" && typeof part.text === "string") {
+        parts.push(part.text);
+      }
+    }
+  }
+
+  return parts.join("");
+}
+
+function describeTokenUsage(payload: unknown): string {
+  const usage = (payload as { usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number } }).usage;
+  if (!usage) {
+    return "tokens n/a";
+  }
+
+  return `tokens in ${usage.input_tokens ?? "?"} / out ${usage.output_tokens ?? "?"}`;
+}
+
+async function requestJsonFromOpenAi(
+  config: Config,
+  options: {
+    label: string;
+    systemPrompt: string;
+    input: unknown;
+    schemaName: string;
+    schema: Record<string, unknown>;
+  }
+): Promise<unknown> {
+  const url = `${config.openaiBaseUrl}/responses`;
+  const body = JSON.stringify({
+    model: config.openaiModel,
+    input: [
+      { role: "system", content: options.systemPrompt },
+      { role: "user", content: JSON.stringify(options.input) }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: options.schemaName,
+        strict: true,
+        schema: options.schema
+      }
+    }
+  });
+  const startedAtMs = Date.now();
+
+  console.log(
+    `[${new Date().toISOString()}] openai request -> POST ${url} (${options.label}, model ${config.openaiModel}, schema ${options.schemaName}, ${Math.round(body.length / 1024 * 10) / 10} KB body)`
+  );
+
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.openaiApiKey}`
+      },
+      body,
+      signal: AbortSignal.timeout(config.openaiTimeoutMs)
+    });
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAtMs;
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      console.warn(`[${new Date().toISOString()}] openai request timed out after ${elapsedMs} ms (${options.label})`);
+      throw new Error("OpenAI request timed out");
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[${new Date().toISOString()}] openai request failed after ${elapsedMs} ms (${options.label}): ${message}`);
+    throw new Error(`OpenAI request failed: ${message}`);
+  }
+
+  const rawBody = await response.text();
+  const elapsedMs = Date.now() - startedAtMs;
+
+  if (!response.ok) {
+    const message = describeOpenAiError(rawBody, response.status);
+    console.warn(
+      `[${new Date().toISOString()}] openai response <- ${response.status} in ${elapsedMs} ms (${options.label}): ${message}`
+    );
+    throw new Error(`OpenAI request failed: ${message}`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    console.warn(`[${new Date().toISOString()}] openai response <- 200 in ${elapsedMs} ms (${options.label}) but the body is not JSON`);
+    throw new Error("OpenAI returned a malformed response");
+  }
+
+  console.log(
+    `[${new Date().toISOString()}] openai response <- ${response.status} in ${elapsedMs} ms (${options.label}, ${describeTokenUsage(payload)})`
+  );
+
+  const status = (payload as { status?: string }).status;
+  if (status === "incomplete") {
+    const reason = (payload as { incomplete_details?: { reason?: string } }).incomplete_details?.reason ?? "unknown reason";
+    throw new Error(`OpenAI stopped early (${reason})`);
+  }
+
+  const content = extractResponseText(payload);
+  if (!content.trim()) {
+    throw new Error("OpenAI returned an empty response");
+  }
+
+  try {
+    return JSON.parse(content);
+  } catch {
+    throw new Error("OpenAI returned a plan that is not valid JSON");
+  }
+}
+
+async function requestTabGroupSuggestion(tabs: SuggestionTab[], rules: string, config: Config): Promise<unknown> {
+  return requestJsonFromOpenAi(config, {
+    label: `window plan for ${tabs.length} tabs${rules ? " with user rules" : ""}`,
+    systemPrompt: withUserRules(GROUPING_SYSTEM_PROMPT, rules),
+    input: { colors: TAB_GROUP_COLORS, tabs },
+    schemaName: "tab_group_plan",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["groups"],
+      properties: {
+        groups: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["title", "color", "tabIds"],
+            properties: {
+              title: { type: "string" },
+              color: { type: "string", enum: TAB_GROUP_COLORS },
+              tabIds: { type: "array", items: { type: "integer" } }
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+async function requestGroupForTab(
+  tab: ChoiceTab,
+  groups: CandidateGroup[],
+  rules: string,
+  config: Config
+): Promise<unknown> {
+  return requestJsonFromOpenAi(config, {
+    label: `group choice among ${groups.length} groups${rules ? " with user rules" : ""}`,
+    systemPrompt: withUserRules(SMART_GROUP_SYSTEM_PROMPT, rules),
+    input: { tab, groups },
+    schemaName: "tab_group_choice",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["groupId", "confidence", "reason", "alternatives"],
+      properties: {
+        groupId: { type: ["integer", "null"] },
+        confidence: { type: "number" },
+        reason: { type: "string" },
+        alternatives: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["groupId", "confidence"],
+            properties: {
+              groupId: { type: "integer" },
+              confidence: { type: "number" }
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function sanitizeSuggestedGroups(rawPlan: unknown, knownTabIds: Set<number>): SuggestedGroup[] {
+  const rawGroups = (rawPlan as { groups?: unknown })?.groups;
+  if (!Array.isArray(rawGroups)) {
+    return [];
+  }
+
+  const usedTabIds = new Set<number>();
+  const groups: SuggestedGroup[] = [];
+
+  rawGroups.forEach((rawGroup, index) => {
+    const candidate = rawGroup as { title?: unknown; color?: unknown; tabIds?: unknown };
+    const title = typeof candidate.title === "string" ? candidate.title.trim().slice(0, MAX_GROUP_TITLE_LENGTH) : "";
+    if (!title) {
+      return;
+    }
+
+    const tabIds = (Array.isArray(candidate.tabIds) ? candidate.tabIds : [])
+      .map((tabId) => Number(tabId))
+      .filter((tabId) => Number.isInteger(tabId) && knownTabIds.has(tabId) && !usedTabIds.has(tabId));
+
+    if (tabIds.length < 2) {
+      return;
+    }
+
+    tabIds.forEach((tabId) => usedTabIds.add(tabId));
+    groups.push({
+      title,
+      color:
+        typeof candidate.color === "string" && TAB_GROUP_COLORS.includes(candidate.color)
+          ? candidate.color
+          : TAB_GROUP_COLORS[(index % (TAB_GROUP_COLORS.length - 1)) + 1] ?? "grey",
+      tabIds
+    });
+  });
+
+  return groups;
+}
+
+async function handleSuggestGroups(request: IncomingMessage, response: ServerResponse, config: Config): Promise<void> {
+  if (!config.openaiApiKey) {
+    sendJson(response, 400, {
+      ok: false,
+      error: "OPENAI_API_KEY is not set in the Tabcoach server .env"
+    });
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const payload = body as SuggestGroupsPayload;
+  const tabs = sanitizeSuggestionTabs(payload.tabs);
+
+  if (tabs.length < 2) {
+    sendJson(response, 400, {
+      ok: false,
+      error: "Not enough groupable tabs in this window"
+    });
+    return;
+  }
+
+  const rawPlan = await requestTabGroupSuggestion(tabs, sanitizeUserRules(payload.rules), config);
+  const groups = sanitizeSuggestedGroups(rawPlan, new Set(tabs.map((tab) => tab.id)));
+
+  console.log(
+    `[${new Date().toISOString()}] group suggestion from ${payload.source ?? "unknown"}: ${tabs.length} tabs, ${groups.length} groups (${config.openaiModel})`
+  );
+
+  if (groups.length === 0) {
+    sendJson(response, 502, {
+      ok: false,
+      error: "OpenAI did not suggest any usable groups"
+    });
+    return;
+  }
+
+  sendJson(response, 200, {
+    ok: true,
+    model: config.openaiModel,
+    groups
+  });
+}
+
+function sanitizeGroupSites(rawSites: unknown): GroupSite[] {
+  if (!Array.isArray(rawSites)) {
+    return [];
+  }
+
+  return rawSites
+    .map((rawSite) => {
+      const candidate = rawSite as { host?: unknown; count?: unknown };
+      const host = typeof candidate.host === "string" ? candidate.host.trim().slice(0, 80) : "";
+      const count = Number(candidate.count);
+      return host ? { host, count: Number.isFinite(count) && count > 0 ? Math.floor(count) : 1 } : null;
+    })
+    .filter((site): site is GroupSite => site !== null)
+    .slice(0, MAX_GROUP_SITES);
+}
+
+function sanitizeGroupSampleTabs(rawTabs: unknown): GroupSampleTab[] {
+  if (!Array.isArray(rawTabs)) {
+    return [];
+  }
+
+  return rawTabs
+    .map((rawTab) => {
+      const candidate = rawTab as { title?: unknown; host?: unknown };
+      const title = typeof candidate.title === "string" ? candidate.title.slice(0, MAX_GROUPING_TITLE_LENGTH) : "";
+      const host = typeof candidate.host === "string" ? candidate.host.slice(0, 80) : "";
+      return title || host ? { title, host } : null;
+    })
+    .filter((tab): tab is GroupSampleTab => tab !== null)
+    .slice(0, MAX_GROUP_SAMPLE_TITLES);
+}
+
+function sanitizeCandidateGroups(rawGroups: unknown): CandidateGroup[] {
+  if (!Array.isArray(rawGroups)) {
+    return [];
+  }
+
+  const seenIds = new Set<number>();
+
+  return rawGroups
+    .map((rawGroup) => {
+      const candidate = rawGroup as {
+        id?: unknown;
+        title?: unknown;
+        color?: unknown;
+        tabCount?: unknown;
+        topSites?: unknown;
+        sampleTabs?: unknown;
+        sampleTitles?: unknown;
+      };
+      const id = Number(candidate?.id);
+      const title = typeof candidate.title === "string" ? candidate.title.trim().slice(0, MAX_GROUP_TITLE_LENGTH) : "";
+      if (!Number.isInteger(id) || seenIds.has(id) || !title) {
+        return null;
+      }
+
+      const tabCount = Number(candidate.tabCount);
+      const legacySamples = (Array.isArray(candidate.sampleTitles) ? candidate.sampleTitles : [])
+        .filter((sample): sample is string => typeof sample === "string")
+        .map((sample) => ({ title: sample.slice(0, MAX_GROUPING_TITLE_LENGTH), host: "" }));
+
+      seenIds.add(id);
+      return {
+        id,
+        title,
+        ...(typeof candidate.color === "string" ? { color: candidate.color.slice(0, 20) } : {}),
+        ...(Number.isFinite(tabCount) && tabCount > 0 ? { tabCount: Math.floor(tabCount) } : {}),
+        topSites: sanitizeGroupSites(candidate.topSites),
+        sampleTabs: candidate.sampleTabs === undefined
+          ? legacySamples.slice(0, MAX_GROUP_SAMPLE_TITLES)
+          : sanitizeGroupSampleTabs(candidate.sampleTabs)
+      };
+    })
+    .filter((group): group is CandidateGroup => group !== null)
+    .slice(0, MAX_CANDIDATE_GROUPS);
+}
+
+function sanitizeChoiceTab(rawTab: unknown): ChoiceTab | null {
+  const candidate = rawTab as {
+    title?: unknown;
+    url?: unknown;
+    currentGroupId?: unknown;
+    openedFrom?: { title?: unknown; host?: unknown; groupId?: unknown } | null;
+  };
+
+  const title = typeof candidate?.title === "string" ? candidate.title.slice(0, MAX_GROUPING_TITLE_LENGTH) : "";
+  const url = typeof candidate?.url === "string" ? candidate.url.slice(0, MAX_GROUPING_URL_LENGTH) : "";
+  if (!title && !url) {
+    return null;
+  }
+
+  const currentGroupId = Number(candidate?.currentGroupId);
+  const opener = candidate?.openedFrom;
+  const openerGroupId = Number(opener?.groupId);
+
+  return {
+    title,
+    url,
+    currentGroupId: Number.isInteger(currentGroupId) ? currentGroupId : null,
+    openedFrom: opener
+      ? {
+          title: typeof opener.title === "string" ? opener.title.slice(0, MAX_GROUPING_TITLE_LENGTH) : "",
+          host: typeof opener.host === "string" ? opener.host.slice(0, 80) : "",
+          groupId: Number.isInteger(openerGroupId) ? openerGroupId : null
+        }
+      : null
+  };
+}
+
+async function handleSuggestGroupForTab(request: IncomingMessage, response: ServerResponse, config: Config): Promise<void> {
+  if (!config.openaiApiKey) {
+    sendJson(response, 400, {
+      ok: false,
+      error: "OPENAI_API_KEY is not set in the Tabcoach server .env"
+    });
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const payload = body as SuggestGroupForTabPayload;
+  const tab = sanitizeChoiceTab(payload.tab);
+  const groups = sanitizeCandidateGroups(payload.groups);
+
+  if (!tab) {
+    sendJson(response, 400, { ok: false, error: "Missing tab to place" });
+    return;
+  }
+
+  if (groups.length === 0) {
+    sendJson(response, 400, { ok: false, error: "No candidate groups in this window" });
+    return;
+  }
+
+  const rawChoice = (await requestGroupForTab(tab, groups, sanitizeUserRules(payload.rules), config)) as {
+    groupId?: unknown;
+    confidence?: unknown;
+    reason?: unknown;
+    alternatives?: unknown;
+  };
+  const groupIds = new Set(groups.map((group) => group.id));
+  const chosenGroupId = Number(rawChoice?.groupId);
+  const rawConfidence = Number(rawChoice?.confidence);
+  const confidence = Number.isFinite(rawConfidence) ? Math.min(Math.max(rawConfidence, 0), 1) : 0;
+  const reason = typeof rawChoice?.reason === "string" ? rawChoice.reason.trim().slice(0, 120) : "";
+  const isKnownGroup = Number.isInteger(chosenGroupId) && groupIds.has(chosenGroupId);
+  const meetsThreshold = confidence >= config.smartGroupMinConfidence;
+  const groupId = isKnownGroup && meetsThreshold ? chosenGroupId : null;
+
+  const groupTitleById = new Map(groups.map((group) => [group.id, group.title]));
+  const alternatives = (Array.isArray(rawChoice?.alternatives) ? rawChoice.alternatives : [])
+    .map((raw) => {
+      const candidate = raw as { groupId?: unknown; confidence?: unknown };
+      const altGroupId = Number(candidate?.groupId);
+      const altConfidence = Number(candidate?.confidence);
+      if (!Number.isInteger(altGroupId) || !groupIds.has(altGroupId)) {
+        return null;
+      }
+
+      return {
+        groupId: altGroupId,
+        title: groupTitleById.get(altGroupId) ?? "",
+        confidence: Number.isFinite(altConfidence) ? Math.min(Math.max(altConfidence, 0), 1) : 0
+      };
+    })
+    .filter((alternative): alternative is { groupId: number; title: string; confidence: number } => alternative !== null)
+    .slice(0, 3);
+
+  const chosenTitle = isKnownGroup ? groupTitleById.get(chosenGroupId) ?? String(chosenGroupId) : "(none)";
+  const alternativesLabel = alternatives.length
+    ? `, also considered ${alternatives.map((alternative) => `${alternative.title} ${alternative.confidence.toFixed(2)}`).join(", ")}`
+    : "";
+
+  console.log(
+    `[${new Date().toISOString()}] group choice from ${payload.source ?? "unknown"}: "${tab.title}" (now in ${
+      tab.currentGroupId === null ? "no group" : groupTitleById.get(tab.currentGroupId) ?? tab.currentGroupId
+    }) -> ${chosenTitle} ${confidence.toFixed(2)}${meetsThreshold ? "" : " [below threshold]"}${alternativesLabel} — ${reason}`
+  );
+
+  sendJson(response, 200, {
+    ok: true,
+    model: config.openaiModel,
+    groupId,
+    confidence,
+    reason,
+    alternatives,
+    belowThreshold: isKnownGroup && !meetsThreshold
+  });
+}
+
 async function handleRequest(request: IncomingMessage, response: ServerResponse, config: Config): Promise<void> {
   if (!request.url) {
     sendJson(response, 404, { ok: false, error: "Missing URL" });
@@ -700,6 +1360,16 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return;
   }
 
+  if (request.method === "POST" && request.url === "/api/suggest-groups") {
+    await handleSuggestGroups(request, response, config);
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/api/suggest-group-for-tab") {
+    await handleSuggestGroupForTab(request, response, config);
+    return;
+  }
+
   sendJson(response, 404, { ok: false, error: "Not found" });
 }
 
@@ -714,6 +1384,7 @@ async function ensureTabEventLogFile(config: Config): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  loadEnvFile();
   const config = loadConfig();
   await ensureTabSwitchLogFile(config);
   await ensureTabEventLogFile(config);
@@ -732,13 +1403,15 @@ async function main(): Promise<void> {
   });
 
   console.log("tabcoach server started");
-  console.log(JSON.stringify(config, null, 2));
+  console.log(JSON.stringify(describeConfig(config), null, 2));
   console.log(`POST tab snapshots to http://${config.host}:${config.port}/api/sync`);
   console.log(`POST tab switches to http://${config.host}:${config.port}/api/tab-switch`);
   console.log(`GET tab switch stats from http://${config.host}:${config.port}/api/tab-switch-stats`);
   console.log(`POST tab events to http://${config.host}:${config.port}/api/tab-event`);
   console.log(`GET desktop apps from http://${config.host}:${config.port}/api/desktop-apps`);
   console.log(`POST desktop app launches to http://${config.host}:${config.port}/api/desktop-apps/launch`);
+  console.log(`POST tab group suggestions to http://${config.host}:${config.port}/api/suggest-groups`);
+  console.log(`POST single tab group choices to http://${config.host}:${config.port}/api/suggest-group-for-tab`);
 }
 
 void main().catch((error: unknown) => {

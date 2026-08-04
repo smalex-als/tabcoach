@@ -7,6 +7,8 @@ const DEFAULT_SETTINGS = {
   switcherOpenLeft: false,
   showRecentTabIndent: true,
   badgeMode: "both",
+  smartGroupMode: "off",
+  smartGroupRules: "",
   workspaceLaunchGroups: []
 };
 
@@ -23,6 +25,8 @@ const fields = {
   switcherOpenLeft: document.getElementById("switcherOpenLeft"),
   showRecentTabIndent: document.getElementById("showRecentTabIndent"),
   badgeMode: document.getElementById("badgeMode"),
+  smartGroupMode: document.getElementById("smartGroupMode"),
+  smartGroupRules: document.getElementById("smartGroupRules"),
   workspaceLaunchGroups: document.getElementById("workspaceLaunchGroups")
 };
 
@@ -134,6 +138,8 @@ function readFormSettings(workspaceLaunchGroups) {
     switcherOpenLeft: fields.switcherOpenLeft.checked,
     showRecentTabIndent: fields.showRecentTabIndent.checked,
     badgeMode: fields.badgeMode.value,
+    smartGroupMode: fields.smartGroupMode.value,
+    smartGroupRules: fields.smartGroupRules.value.trim(),
     workspaceLaunchGroups
   };
 }
@@ -147,6 +153,8 @@ function writeFormSettings(settings) {
   fields.switcherOpenLeft.checked = Boolean(settings.switcherOpenLeft);
   fields.showRecentTabIndent.checked = settings.showRecentTabIndent !== false;
   fields.badgeMode.value = settings.badgeMode;
+  fields.smartGroupMode.value = settings.smartGroupMode;
+  fields.smartGroupRules.value = settings.smartGroupRules ?? "";
   fields.workspaceLaunchGroups.value = JSON.stringify(settings.workspaceLaunchGroups || [], null, 2);
   updateServerFieldState();
 }
