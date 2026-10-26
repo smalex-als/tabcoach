@@ -240,7 +240,42 @@ function refreshVisibleTabs() {
 
   if (sortMode === "recent") {
     visibleTabs.sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0));
+  } else if (sortMode === "title") {
+    visibleTabs = sortTabsByTitleWithinSections(visibleTabs);
   }
+}
+
+function compareTabsByTitle(left, right) {
+  if (Boolean(left.pinned) !== Boolean(right.pinned)) {
+    return left.pinned ? -1 : 1;
+  }
+
+  return formatTabTitle(left).localeCompare(formatTabTitle(right), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function sortTabsByTitleWithinSections(tabItems) {
+  const sorted = [];
+  let sectionTabs = [];
+  let sectionKey = null;
+
+  const flushSection = () => {
+    sectionTabs.sort(compareTabsByTitle);
+    sorted.push(...sectionTabs);
+    sectionTabs = [];
+  };
+
+  for (const tab of tabItems) {
+    const nextSectionKey = tab.group ? `group:${tab.group.id}` : "ungrouped";
+    if (nextSectionKey !== sectionKey && sectionTabs.length > 0) {
+      flushSection();
+    }
+
+    sectionKey = nextSectionKey;
+    sectionTabs.push(tab);
+  }
+
+  flushSection();
+  return sorted;
 }
 
 function findDuplicateCountsByTabId(tabItems) {
@@ -2539,7 +2574,8 @@ function renderTabs({ scrollBlock = "nearest", updateRowState = true } = {}) {
     return;
   }
 
-  const showGroupSections = (sortMode === "window" || focusedGroupId !== null) && visibleTabs.some((tab) => tab.group);
+  const showGroupSections =
+    (sortMode === "window" || sortMode === "title" || focusedGroupId !== null) && visibleTabs.some((tab) => tab.group);
   const tabCountsBySectionKey = new Map();
   const recencyRanksByTabId = showGroupSections ? getGroupRecencyRanks(visibleTabs) : new Map();
   if (showGroupSections) {
@@ -3148,7 +3184,7 @@ sortButtons.forEach((button) => {
     renderTabs();
     selectedIndex = getRowIndexForTabOrGroup(selectedTabId);
     applyRowState();
-    if (sortMode === "recent") {
+    if (sortMode !== "window") {
       list.scrollTop = 0;
     }
   });
