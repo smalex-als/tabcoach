@@ -2343,6 +2343,7 @@ function positionContextMenu(menu, clientX, clientY) {
 function alignContextMenuSubmenus(menu) {
   const margin = 8;
   const gap = 6;
+  const minPanelWidth = 150;
   const maxPanelHeight = Math.max(80, Math.min(320, window.innerHeight - margin * 2));
 
   menu.querySelectorAll(".context-menu-submenu").forEach((host) => {
@@ -2354,17 +2355,38 @@ function alignContextMenuSubmenus(menu) {
     delete host.dataset.align;
     panel.style.top = "-6px";
     panel.style.maxHeight = `${maxPanelHeight}px`;
+    panel.style.maxWidth = "";
+    panel.style.transform = "";
     panel.style.display = "block";
     panel.style.visibility = "hidden";
 
     const hostRect = host.getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
-    const fitsRight = hostRect.right + gap + panelRect.width <= window.innerWidth - margin;
-    const fitsLeft = hostRect.left - gap - panelRect.width >= margin;
-    if (!fitsRight && fitsLeft) {
-      host.dataset.align = "left";
+    const panelWidth = panel.getBoundingClientRect().width;
+    const spaceRight = window.innerWidth - margin - (hostRect.right + gap);
+    const spaceLeft = hostRect.left - gap - margin;
+
+    if (panelWidth > spaceRight) {
+      if (panelWidth <= spaceLeft) {
+        host.dataset.align = "left";
+      } else {
+        if (spaceLeft > spaceRight) {
+          host.dataset.align = "left";
+        }
+
+        panel.style.maxWidth = `${Math.max(minPanelWidth, Math.floor(Math.max(spaceRight, spaceLeft)))}px`;
+      }
     }
 
+    const alignedRect = panel.getBoundingClientRect();
+    const leftOverflow = margin - alignedRect.left;
+    const rightOverflow = alignedRect.right - (window.innerWidth - margin);
+    if (leftOverflow > 0) {
+      panel.style.transform = `translateX(${Math.round(leftOverflow)}px)`;
+    } else if (rightOverflow > 0) {
+      panel.style.transform = `translateX(${-Math.round(rightOverflow)}px)`;
+    }
+
+    const panelRect = panel.getBoundingClientRect();
     const bottomOverflow = panelRect.bottom - (window.innerHeight - margin);
     if (bottomOverflow > 0) {
       const topShift = Math.min(bottomOverflow, hostRect.top - margin);
