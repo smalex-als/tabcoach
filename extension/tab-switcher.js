@@ -13,6 +13,7 @@ const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
 const CLOSE_GROUP_MESSAGE = "tabcoach:close-group";
+const SORT_GROUP_TABS_MESSAGE = "tabcoach:sort-group-tabs";
 const OPEN_GROUP_BOOKMARK_MESSAGE = "tabcoach:open-group-bookmark";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
@@ -240,8 +241,6 @@ function refreshVisibleTabs() {
 
   if (sortMode === "recent") {
     visibleTabs.sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0));
-  } else if (sortMode === "title") {
-    visibleTabs = sortTabsByTitleWithinSections(visibleTabs);
   }
 }
 
@@ -268,31 +267,6 @@ function compareTabsByTitle(left, right) {
   return comparison !== 0
     ? comparison
     : formatTabTitle(left).localeCompare(formatTabTitle(right), undefined, { numeric: true, sensitivity: "base" });
-}
-
-function sortTabsByTitleWithinSections(tabItems) {
-  const sorted = [];
-  let sectionTabs = [];
-  let sectionKey = null;
-
-  const flushSection = () => {
-    sectionTabs.sort(compareTabsByTitle);
-    sorted.push(...sectionTabs);
-    sectionTabs = [];
-  };
-
-  for (const tab of tabItems) {
-    const nextSectionKey = tab.group ? `group:${tab.group.id}` : "ungrouped";
-    if (nextSectionKey !== sectionKey && sectionTabs.length > 0) {
-      flushSection();
-    }
-
-    sectionKey = nextSectionKey;
-    sectionTabs.push(tab);
-  }
-
-  flushSection();
-  return sorted;
 }
 
 function findDuplicateCountsByTabId(tabItems) {
@@ -849,6 +823,39 @@ async function closeGroup(groupId) {
   renderTabs();
   selectedIndex = Math.min(selectedIndex, Math.max(rows.length - 1, 0));
   applyRowState();
+}
+
+function getGroupTabsInWindowOrder(groupId) {
+  return tabs.filter((tab) => tab.group?.id === groupId);
+}
+
+function isGroupSortedByTitle(groupId) {
+  const groupTabs = getGroupTabsInWindowOrder(groupId);
+  return groupTabs.every((tab, index) => index === 0 || compareTabsByTitle(groupTabs[index - 1], tab) <= 0);
+}
+
+async function sortGroupTabsByTitle(groupId) {
+  if (typeof groupId !== "number") {
+    return;
+  }
+
+  const groupTabs = getGroupTabsInWindowOrder(groupId);
+  if (groupTabs.length <= 1) {
+    return;
+  }
+
+  const orderedTabIds = [...groupTabs].sort(compareTabsByTitle).map((tab) => tab.id);
+  const selectedTabId = getSelectedTabId();
+  const response = await sendMessage({ type: SORT_GROUP_TABS_MESSAGE, groupId, tabIds: orderedTabIds }).then((result) =>
+    assertResponse(result, "Group sort failed")
+  );
+  setTabs(response.tabs);
+  refreshDuplicateCounts();
+  refreshVisibleTabs();
+  renderTabs();
+  selectedIndex = getRowIndexForTabOrGroup(selectedTabId) || getRowIndexForGroupId(groupId);
+  applyRowState("center");
+  showShortcutNotification(`Sorted ${pluralizeCount(groupTabs.length, "tab")} by name`);
 }
 
 async function openGroupBookmark(groupId, bookmarkId, insertOffset = 0) {
@@ -2454,6 +2461,7 @@ function openGroupContextMenu(group, rowIndex, clientX, clientY) {
   menu.setAttribute("aria-label", `Actions for ${group.title || "Unnamed group"}`);
 
   const switchGroupOptions = getGroupOptions({ excludeGroupId: group.id });
+  const groupTabCount = getGroupTabsInWindowOrder(group.id).length;
   const menuItems = [
     createContextMenuItem(focusedGroupId === group.id ? "Refocus group" : "Focus group", () => focusGroup(group.id)),
     createContextSubmenuItem(
@@ -2467,6 +2475,9 @@ function openGroupContextMenu(group, rowIndex, clientX, clientY) {
     createContextMenuSeparator(),
     createContextMenuItem(group.collapsed ? "Expand group" : "Collapse group", () => setGroupCollapsed(group.id, !group.collapsed)),
     createContextMenuItem("Rename group", () => startRenameGroup(group.id)),
+    createContextMenuItem("Sort tabs by name", () => sortGroupTabsByTitle(group.id), {
+      disabled: groupTabCount <= 1 || isGroupSortedByTitle(group.id)
+    }),
     createContextMenuSeparator(),
     createContextMenuItem("Close group", () => closeGroup(group.id), { tone: "danger" })
   ];
@@ -2591,8 +2602,7 @@ function renderTabs({ scrollBlock = "nearest", updateRowState = true } = {}) {
     return;
   }
 
-  const showGroupSections =
-    (sortMode === "window" || sortMode === "title" || focusedGroupId !== null) && visibleTabs.some((tab) => tab.group);
+  const showGroupSections = (sortMode === "window" || focusedGroupId !== null) && visibleTabs.some((tab) => tab.group);
   const tabCountsBySectionKey = new Map();
   const recencyRanksByTabId = showGroupSections ? getGroupRecencyRanks(visibleTabs) : new Map();
   if (showGroupSections) {
@@ -3201,7 +3211,7 @@ sortButtons.forEach((button) => {
     renderTabs();
     selectedIndex = getRowIndexForTabOrGroup(selectedTabId);
     applyRowState();
-    if (sortMode !== "window") {
+    if (sortMode === "recent") {
       list.scrollTop = 0;
     }
   });

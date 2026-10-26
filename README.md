@@ -82,7 +82,7 @@ The extension will:
 - sync every minute
 - auto-close duplicate tabs conservatively
 - show server health when the local server is enabled, or local duplicate-group count when it is disabled
-- show, create, drag-reorder, group, bookmark, copy URLs, close, and switch between tabs in the current window with `Command+E` on macOS, including inline duplicate indicators, tab group labels, search, recently visited sorting, and alphabetical sorting of tab names inside each group
+- show, create, drag-reorder, group, bookmark, copy URLs, close, and switch between tabs in the current window with `Command+E` on macOS, including inline duplicate indicators, tab group labels, search, recently visited sorting, and per-group sorting of tabs by name from the group context menu
 - use toolbar actions in the `Command+E` popup to create a group, move to a group, ungroup, or duplicate the currently selected tab
 - collapse, expand, and rename tab groups directly from the `Command+E` popup
 - show saved bookmarks for a tab group directly in the list when they are not currently open, then open a selected bookmark back into that group

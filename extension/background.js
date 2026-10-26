@@ -29,7 +29,7 @@ const TRANSIENT_RETRY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_DELAY_MS = 500;
 const NUMERIC_BOOKMARK_BADGE_MS = 1500;
 const ACTION_TITLE = "Tabcoach";
-const BACKGROUND_BUILD = "smart-group-9";
+const BACKGROUND_BUILD = "smart-group-10";
 const TAB_SWITCHER_PAGE = "tab-switcher.html";
 const GET_TAB_SWITCHER_ITEMS_MESSAGE = "tabcoach:get-tab-switcher-items";
 const CREATE_TAB_MESSAGE = "tabcoach:create-tab";
@@ -47,6 +47,7 @@ const SET_TAB_GROUP_MESSAGE = "tabcoach:set-tab-group";
 const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
 const CLOSE_GROUP_MESSAGE = "tabcoach:close-group";
+const SORT_GROUP_TABS_MESSAGE = "tabcoach:sort-group-tabs";
 const OPEN_GROUP_BOOKMARK_MESSAGE = "tabcoach:open-group-bookmark";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
@@ -2578,6 +2579,30 @@ async function closeGroupFromSwitcher(groupId, context = {}) {
   return collectTabSwitcherItems(windowId);
 }
 
+async function sortGroupTabsFromSwitcher(groupId, tabIds, context = {}) {
+  const { group, windowId } = await getValidatedGroupInSwitcherWindow(groupId, context);
+
+  if (!Array.isArray(tabIds) || tabIds.some((tabId) => typeof tabId !== "number" || !Number.isInteger(tabId))) {
+    throw new Error("Invalid tab ids");
+  }
+
+  const groupTabs = await chrome.tabs.query({ windowId, groupId: group.id });
+  const groupTabIds = new Set(groupTabs.map((tab) => tab.id).filter((tabId) => typeof tabId === "number"));
+  const orderedTabIds = [...new Set(tabIds)].filter((tabId) => groupTabIds.has(tabId));
+
+  if (orderedTabIds.length !== groupTabIds.size) {
+    throw new Error("Tab order does not match the group contents");
+  }
+
+  if (orderedTabIds.length <= 1) {
+    return collectTabSwitcherItems(windowId);
+  }
+
+  const firstIndex = Math.min(...groupTabs.map((tab) => tab.index));
+  await chrome.tabs.move(orderedTabIds, { index: firstIndex });
+  return collectTabSwitcherItems(windowId);
+}
+
 async function getOrCreateBookmarkFolder() {
   const existingFolderId = await findBookmarkFolderId();
   if (existingFolderId) {
@@ -3677,6 +3702,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach group rename failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === SORT_GROUP_TABS_MESSAGE) {
+    void sortGroupTabsFromSwitcher(message.groupId, message.tabIds, switcherContext)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach group sort failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 
