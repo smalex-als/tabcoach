@@ -245,12 +245,29 @@ function refreshVisibleTabs() {
   }
 }
 
+function getTabSortKey(tab) {
+  const title = formatTabTitle(tab);
+  const stripped = title
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return stripped || title.trim();
+}
+
 function compareTabsByTitle(left, right) {
   if (Boolean(left.pinned) !== Boolean(right.pinned)) {
     return left.pinned ? -1 : 1;
   }
 
-  return formatTabTitle(left).localeCompare(formatTabTitle(right), undefined, { numeric: true, sensitivity: "base" });
+  const comparison = getTabSortKey(left).localeCompare(getTabSortKey(right), undefined, {
+    numeric: true,
+    sensitivity: "base"
+  });
+
+  return comparison !== 0
+    ? comparison
+    : formatTabTitle(left).localeCompare(formatTabTitle(right), undefined, { numeric: true, sensitivity: "base" });
 }
 
 function sortTabsByTitleWithinSections(tabItems) {
