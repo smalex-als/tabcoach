@@ -959,13 +959,15 @@ body:not(.window-blurred) .row:hover {
   top: -6px;
   left: calc(100% + 6px);
   display: none;
-  width: 220px;
+  width: max-content;
+  min-width: 180px;
+  max-width: min(260px, calc(100vw - 32px));
   max-height: min(320px, calc(100vh - 16px));
   overflow-y: auto;
 }
 
 .context-menu-submenu-panel-wide {
-  width: min(420px, calc(100vw - 32px));
+  max-width: min(300px, calc(100vw - 32px));
 }
 
 .context-menu-submenu[data-align="left"] > .context-menu-submenu-panel {
