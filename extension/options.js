@@ -6,6 +6,7 @@ const DEFAULT_SETTINGS = {
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
   showRecentTabIndent: true,
+  openNearSimilarTabs: true,
   badgeMode: "both",
   smartGroupMode: "off",
   smartGroupRules: "",
@@ -24,6 +25,7 @@ const fields = {
   syncIntervalMinutes: document.getElementById("syncIntervalMinutes"),
   switcherOpenLeft: document.getElementById("switcherOpenLeft"),
   showRecentTabIndent: document.getElementById("showRecentTabIndent"),
+  openNearSimilarTabs: document.getElementById("openNearSimilarTabs"),
   badgeMode: document.getElementById("badgeMode"),
   smartGroupMode: document.getElementById("smartGroupMode"),
   smartGroupRules: document.getElementById("smartGroupRules"),
@@ -137,6 +139,7 @@ function readFormSettings(workspaceLaunchGroups) {
     syncIntervalMinutes: Number(fields.syncIntervalMinutes.value),
     switcherOpenLeft: fields.switcherOpenLeft.checked,
     showRecentTabIndent: fields.showRecentTabIndent.checked,
+    openNearSimilarTabs: fields.openNearSimilarTabs.checked,
     badgeMode: fields.badgeMode.value,
     smartGroupMode: fields.smartGroupMode.value,
     smartGroupRules: fields.smartGroupRules.value.trim(),
@@ -152,6 +155,7 @@ function writeFormSettings(settings) {
   fields.syncIntervalMinutes.value = String(settings.syncIntervalMinutes);
   fields.switcherOpenLeft.checked = Boolean(settings.switcherOpenLeft);
   fields.showRecentTabIndent.checked = settings.showRecentTabIndent !== false;
+  fields.openNearSimilarTabs.checked = settings.openNearSimilarTabs !== false;
   fields.badgeMode.value = settings.badgeMode;
   fields.smartGroupMode.value = settings.smartGroupMode;
   fields.smartGroupRules.value = settings.smartGroupRules ?? "";

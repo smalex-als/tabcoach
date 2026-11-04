@@ -6,6 +6,7 @@ const DEFAULT_SETTINGS = {
   syncIntervalMinutes: 1,
   switcherOpenLeft: false,
   showRecentTabIndent: true,
+  openNearSimilarTabs: true,
   badgeMode: "both",
   smartGroupMode: "off",
   smartGroupRules: "",
@@ -199,6 +200,7 @@ function sanitizeSettings(settings) {
     syncIntervalMinutes: Number.isFinite(syncIntervalMinutes) && syncIntervalMinutes >= 1 ? syncIntervalMinutes : DEFAULT_SETTINGS.syncIntervalMinutes,
     switcherOpenLeft: Boolean(settings.switcherOpenLeft),
     showRecentTabIndent: settings.showRecentTabIndent !== false,
+    openNearSimilarTabs: settings.openNearSimilarTabs !== false,
     badgeMode: badgeModes.has(settings.badgeMode) ? settings.badgeMode : DEFAULT_SETTINGS.badgeMode,
     smartGroupMode: SMART_GROUP_MODES.has(settings.smartGroupMode) ? settings.smartGroupMode : DEFAULT_SETTINGS.smartGroupMode,
     smartGroupRules: typeof settings.smartGroupRules === "string" ? settings.smartGroupRules.trim().slice(0, MAX_SMART_GROUP_RULES_LENGTH) : "",
@@ -2314,6 +2316,143 @@ function logSmartGroup(message, details = {}) {
   console.info(`Tabcoach smart grouping: ${message}`, details);
 }
 
+const SIMILAR_TAB_TITLE_THRESHOLD = 0.6;
+const similarPlacementResultByTabId = new Map();
+
+function getSimilarityTitleTokens(title) {
+  return new Set(
+    getTabTitleKey(title)
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((token) => token.length > 1)
+  );
+}
+
+function getTitleSimilarity(leftTitle, rightTitle) {
+  const left = getSimilarityTitleTokens(leftTitle);
+  const right = getSimilarityTitleTokens(rightTitle);
+  if (left.size === 0 || right.size === 0) {
+    return 0;
+  }
+
+  let shared = 0;
+  for (const token of left) {
+    if (right.has(token)) {
+      shared += 1;
+    }
+  }
+
+  return shared / (left.size + right.size - shared);
+}
+
+// 4: same page ignoring tracking params and hash; 3: same path with different
+// parameters; 2: same host with an identical title; 1: same host with a similar title.
+function scoreSimilarTab(tab, candidate) {
+  let tabUrl;
+  let candidateUrl;
+  try {
+    tabUrl = new URL(tab.url);
+    candidateUrl = new URL(candidate.url);
+  } catch {
+    return 0;
+  }
+
+  if (tabUrl.origin !== candidateUrl.origin) {
+    return 0;
+  }
+
+  if (normalizeUrl(tab.url) === normalizeUrl(candidate.url)) {
+    return 4;
+  }
+
+  if (tabUrl.pathname.replace(/\/+$/, "") === candidateUrl.pathname.replace(/\/+$/, "")) {
+    return 3;
+  }
+
+  if (isWeakTabTitle(tab.title ?? "") || isWeakTabTitle(candidate.title ?? "")) {
+    return 0;
+  }
+
+  if (getTabTitleKey(tab.title) === getTabTitleKey(candidate.title)) {
+    return 2;
+  }
+
+  return getTitleSimilarity(tab.title, candidate.title) >= SIMILAR_TAB_TITLE_THRESHOLD ? 1 : 0;
+}
+
+async function placeNewTabNearSimilar(tabId) {
+  const settings = await getSettings();
+  if (!settings.openNearSimilarTabs) {
+    return false;
+  }
+
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || tab.pinned || !isSmartGroupCandidateUrl(tab.url)) {
+    return false;
+  }
+
+  const windowTabs = await chrome.tabs.query({ windowId: tab.windowId });
+  let best = null;
+  let bestScore = 0;
+
+  for (const candidate of windowTabs) {
+    if (candidate.id === tab.id || candidate.pinned || !isSmartGroupCandidateUrl(candidate.url)) {
+      continue;
+    }
+
+    const score = scoreSimilarTab(tab, candidate);
+    if (score > bestScore || (score === bestScore && score > 0 && (candidate.lastAccessed ?? 0) > (best?.lastAccessed ?? 0))) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+
+  if (!best) {
+    return false;
+  }
+
+  const currentGroupId = typeof tab.groupId === "number" ? tab.groupId : -1;
+  const targetGroupId = typeof best.groupId === "number" ? best.groupId : -1;
+
+  if (targetGroupId !== currentGroupId) {
+    if (targetGroupId >= 0) {
+      await chrome.tabs.group({ groupId: targetGroupId, tabIds: [tabId] });
+      await chrome.tabGroups.update(targetGroupId, { collapsed: false });
+    } else {
+      await chrome.tabs.ungroup(tabId);
+    }
+  }
+
+  const liveTab = await chrome.tabs.get(tabId).catch(() => null);
+  const liveMatch = await chrome.tabs.get(best.id).catch(() => null);
+  if (!liveTab || !liveMatch) {
+    return false;
+  }
+
+  if (liveTab.index !== liveMatch.index + 1) {
+    await chrome.tabs.move(tabId, { index: liveTab.index < liveMatch.index ? liveMatch.index : liveMatch.index + 1 });
+  }
+
+  logSmartGroup("placed next to a similar tab", { tabId, matchId: best.id, score: bestScore });
+  notifyTabSwitcherRefresh(tab.windowId);
+  return true;
+}
+
+async function maybePlaceNewTabNearSimilar(tabId, { final = false } = {}) {
+  if (similarPlacementResultByTabId.has(tabId)) {
+    return similarPlacementResultByTabId.get(tabId);
+  }
+
+  if (!(await isRecentlyCreatedTab(tabId))) {
+    return false;
+  }
+
+  const placed = await placeNewTabNearSimilar(tabId);
+  if (placed || final) {
+    similarPlacementResultByTabId.set(tabId, placed);
+  }
+  return placed;
+}
+
 async function maybeSmartGroupNewTab(tabId, { force = false } = {}) {
   if (typeof tabId !== "number") {
     return;
@@ -3342,10 +3481,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (typeof tabId === "number") {
     cleanupRecentTabCreations();
   }
-  if (changeInfo?.status === "complete") {
-    void maybeSmartGroupNewTab(tabId).catch((error) => {
-      console.warn("Tabcoach smart grouping failed", error);
-    });
+  if (changeInfo?.url || changeInfo?.status === "complete") {
+    const isFinal = changeInfo?.status === "complete";
+    void maybePlaceNewTabNearSimilar(tabId, { final: isFinal })
+      .then((placed) => (isFinal && !placed ? maybeSmartGroupNewTab(tabId) : undefined))
+      .catch((error) => {
+        console.warn("Tabcoach tab placement failed", error);
+      });
   }
   notifyTabSwitcherRefresh(tab?.windowId);
   scheduleSync("tab-updated");
@@ -3355,6 +3497,7 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   if (typeof tabId === "number") {
     recentTabCreations.delete(tabId);
     smartGroupEvaluatedTabIds.delete(tabId);
+    similarPlacementResultByTabId.delete(tabId);
     void removeTabFromActivationHistory(tabId, removeInfo?.windowId);
   }
   notifyTabSwitcherRefresh(removeInfo?.windowId);
