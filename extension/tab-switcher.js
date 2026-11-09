@@ -14,6 +14,7 @@ const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
 const CLOSE_GROUP_MESSAGE = "tabcoach:close-group";
 const SORT_GROUP_TABS_MESSAGE = "tabcoach:sort-group-tabs";
+const SORT_UNGROUPED_TABS_MESSAGE = "tabcoach:sort-ungrouped-tabs";
 const OPEN_GROUP_BOOKMARK_MESSAGE = "tabcoach:open-group-bookmark";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
@@ -825,37 +826,39 @@ async function closeGroup(groupId) {
   applyRowState();
 }
 
-function getGroupTabsInWindowOrder(groupId) {
-  return tabs.filter((tab) => tab.group?.id === groupId);
+function getTabsInSortScope(groupId = null) {
+  return tabs.filter((tab) => groupId === null ? !tab.group : tab.group?.id === groupId);
 }
 
-function isGroupSortedByTitle(groupId) {
-  const groupTabs = getGroupTabsInWindowOrder(groupId);
-  return groupTabs.every((tab, index) => index === 0 || compareTabsByTitle(groupTabs[index - 1], tab) <= 0);
+function isSortScopeSortedByTitle(groupId = null) {
+  const scopeTabs = getTabsInSortScope(groupId);
+  return scopeTabs.every((tab, index) => index === 0 || compareTabsByTitle(scopeTabs[index - 1], tab) <= 0);
 }
 
-async function sortGroupTabsByTitle(groupId) {
-  if (typeof groupId !== "number") {
+async function sortTabsByTitle(groupId = null) {
+  if (groupId !== null && typeof groupId !== "number") {
     return;
   }
 
-  const groupTabs = getGroupTabsInWindowOrder(groupId);
-  if (groupTabs.length <= 1) {
+  const scopeTabs = getTabsInSortScope(groupId);
+  if (scopeTabs.length <= 1) {
     return;
   }
 
-  const orderedTabIds = [...groupTabs].sort(compareTabsByTitle).map((tab) => tab.id);
+  const orderedTabIds = [...scopeTabs].sort(compareTabsByTitle).map((tab) => tab.id);
   const selectedTabId = getSelectedTabId();
-  const response = await sendMessage({ type: SORT_GROUP_TABS_MESSAGE, groupId, tabIds: orderedTabIds }).then((result) =>
-    assertResponse(result, "Group sort failed")
+  const type = groupId === null ? SORT_UNGROUPED_TABS_MESSAGE : SORT_GROUP_TABS_MESSAGE;
+  const response = await sendMessage({ type, groupId, tabIds: orderedTabIds }).then((result) =>
+    assertResponse(result, "Tab sort failed")
   );
   setTabs(response.tabs);
+  sortMode = "window";
   refreshDuplicateCounts();
   refreshVisibleTabs();
   renderTabs();
   selectedIndex = getRowIndexForTabOrGroup(selectedTabId) || getRowIndexForGroupId(groupId);
   applyRowState("center");
-  showShortcutNotification(`Sorted ${pluralizeCount(groupTabs.length, "tab")} by name`);
+  showShortcutNotification(`Sorted ${pluralizeCount(scopeTabs.length, "tab")} by name`);
 }
 
 async function openGroupBookmark(groupId, bookmarkId, insertOffset = 0) {
@@ -2414,6 +2417,7 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
   const canMoveTab = canMoveTabToGroup(tab);
   const duplicateTabs = getDuplicateTabsForTab(tab);
   const moveGroupOptions = getMoveTabGroupOptions(tab);
+  const sortGroupId = tab.group?.id ?? null;
   const menuItems = [
     createContextMenuItem("Switch to tab", () => switchToSelectedTab()),
     createContextMenuItem("Duplicate tab", () => duplicateTab(tab.id)),
@@ -2428,6 +2432,10 @@ function openTabContextMenu(tab, rowIndex, clientX, clientY) {
     createContextMenuItem(tab.bookmarked ? "Remove bookmark" : "Bookmark tab", () => toggleBookmark(tab.id)),
     createContextMenuItem("Add to app bookmarks", () => addAppBookmark(tab.id), {
       disabled: !tab.url || tab.url.startsWith("chrome://")
+    }),
+    createContextMenuSeparator(),
+    createContextMenuItem("Sort tabs by name", () => sortTabsByTitle(sortGroupId), {
+      disabled: isSortScopeSortedByTitle(sortGroupId)
     }),
     createContextMenuSeparator(),
     createContextMenuItem("Create new group", () => createGroupForTab(tab.id), {
@@ -2483,7 +2491,7 @@ function openGroupContextMenu(group, rowIndex, clientX, clientY) {
   menu.setAttribute("aria-label", `Actions for ${group.title || "Unnamed group"}`);
 
   const switchGroupOptions = getGroupOptions({ excludeGroupId: group.id });
-  const groupTabCount = getGroupTabsInWindowOrder(group.id).length;
+  const groupTabCount = getTabsInSortScope(group.id).length;
   const menuItems = [
     createContextMenuItem(focusedGroupId === group.id ? "Refocus group" : "Focus group", () => focusGroup(group.id)),
     createContextSubmenuItem(
@@ -2497,8 +2505,8 @@ function openGroupContextMenu(group, rowIndex, clientX, clientY) {
     createContextMenuSeparator(),
     createContextMenuItem(group.collapsed ? "Expand group" : "Collapse group", () => setGroupCollapsed(group.id, !group.collapsed)),
     createContextMenuItem("Rename group", () => startRenameGroup(group.id)),
-    createContextMenuItem("Sort tabs by name", () => sortGroupTabsByTitle(group.id), {
-      disabled: groupTabCount <= 1 || isGroupSortedByTitle(group.id)
+    createContextMenuItem("Sort tabs by name", () => sortTabsByTitle(group.id), {
+      disabled: groupTabCount <= 1 || isSortScopeSortedByTitle(group.id)
     }),
     createContextMenuSeparator(),
     createContextMenuItem("Close group", () => closeGroup(group.id), { tone: "danger" })

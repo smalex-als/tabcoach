@@ -49,6 +49,7 @@ const SET_GROUP_COLLAPSED_MESSAGE = "tabcoach:set-group-collapsed";
 const RENAME_GROUP_MESSAGE = "tabcoach:rename-group";
 const CLOSE_GROUP_MESSAGE = "tabcoach:close-group";
 const SORT_GROUP_TABS_MESSAGE = "tabcoach:sort-group-tabs";
+const SORT_UNGROUPED_TABS_MESSAGE = "tabcoach:sort-ungrouped-tabs";
 const OPEN_GROUP_BOOKMARK_MESSAGE = "tabcoach:open-group-bookmark";
 const TOGGLE_BOOKMARK_MESSAGE = "tabcoach:toggle-bookmark";
 const COPY_TAB_URL_MESSAGE = "tabcoach:copy-tab-url";
@@ -2742,6 +2743,53 @@ async function sortGroupTabsFromSwitcher(groupId, tabIds, context = {}) {
   return collectTabSwitcherItems(windowId);
 }
 
+async function sortUngroupedTabsFromSwitcher(tabIds, context = {}) {
+  const windowId = getSwitcherContextWindowId(context);
+  if (!Number.isInteger(windowId) || windowId < 0) {
+    throw new Error("Invalid window id");
+  }
+  if (!Array.isArray(tabIds) || tabIds.some((tabId) => !Number.isInteger(tabId))) {
+    throw new Error("Invalid tab ids");
+  }
+
+  const windowTabs = (await chrome.tabs.query({ windowId })).sort((left, right) => left.index - right.index);
+  const ungroupedTabs = windowTabs.filter((tab) => tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE);
+  const tabsById = new Map(ungroupedTabs.map((tab) => [tab.id, tab]));
+  if (tabIds.length !== tabsById.size || new Set(tabIds).size !== tabIds.length || tabIds.some((id) => !tabsById.has(id))) {
+    throw new Error("Tab order does not match the ungrouped window contents");
+  }
+
+  let nextTabIndex = 0;
+  const desiredTabs = windowTabs.map((tab) => tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE
+    ? tabsById.get(tabIds[nextTabIndex++])
+    : tab);
+  if (desiredTabs.some((tab, index) => Boolean(tab.pinned) !== Boolean(windowTabs[index].pinned))) {
+    throw new Error("Cannot move tabs across the pinned tab boundary");
+  }
+
+  // Keep group slots intact. Move whole groups when restoring the prefix so
+  // no ungrouped tab is temporarily inserted into the middle of a group.
+  const currentTabs = [...windowTabs];
+  for (let index = 0; index < desiredTabs.length;) {
+    const tab = desiredTabs[index];
+    const grouped = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE;
+    const count = grouped ? windowTabs.filter((item) => item.groupId === tab.groupId).length : 1;
+    const currentIndex = currentTabs.findIndex((item) => item.id === tab.id);
+    if (currentIndex !== index) {
+      if (grouped) {
+        await chrome.tabGroups.move(tab.groupId, { index });
+      } else {
+        await chrome.tabs.move(tab.id, { index });
+      }
+      const moved = currentTabs.splice(currentIndex, count);
+      currentTabs.splice(index, 0, ...moved);
+    }
+    index += count;
+  }
+
+  return collectTabSwitcherItems(windowId);
+}
+
 async function getOrCreateBookmarkFolder() {
   const existingFolderId = await findBookmarkFolderId();
   if (existingFolderId) {
@@ -3858,6 +3906,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => {
         console.error("Tabcoach group sort failed", error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+
+    return true;
+  }
+
+  if (message?.type === SORT_UNGROUPED_TABS_MESSAGE) {
+    void sortUngroupedTabsFromSwitcher(message.tabIds, switcherContext)
+      .then((tabs) => {
+        sendResponse({ ok: true, tabs });
+      })
+      .catch((error) => {
+        console.error("Tabcoach ungrouped tab sort failed", error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 
